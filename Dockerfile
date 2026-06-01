@@ -286,5 +286,21 @@ RUN mkdir -p /opt/data
 # and exec's the final program so its exit code becomes the container
 # exit code. Without the wrapper-as-ENTRYPOINT, leading-dash args
 # like `--version` would be intercepted by /init's POSIX shell.
+# ---------- cloudflared (Cloudflare Tunnel connector) ----------
+# Reaches the dashboard via an OUTBOUND Cloudflare Tunnel instead of a public
+# Railway port. cloudflared forwards the tunnel hostname to http://127.0.0.1:8080,
+# so the dashboard sees a loopback peer -- required for its --insecure WebSocket
+# chat to accept remote clients. Supervised by docker/s6-rc.d/cloudflared and
+# no-ops when CLOUDFLARED_TUNNEL_TOKEN is unset. TARGETARCH carried from above.
+RUN set -eu; \
+    case "${TARGETARCH:-amd64}" in \
+        amd64) cf_arch="amd64" ;; \
+        arm64) cf_arch="arm64" ;; \
+        *) echo "Unsupported TARGETARCH=${TARGETARCH} for cloudflared" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL --retry 3 -o /usr/local/bin/cloudflared \
+        "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${cf_arch}"; \
+    chmod 0755 /usr/local/bin/cloudflared
+
 ENTRYPOINT [ "/init", "/opt/hermes/docker/main-wrapper.sh" ]
 CMD [ ]

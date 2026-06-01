@@ -1,0 +1,24 @@
+#!/command/with-contenv sh
+# shellcheck shell=sh
+# Cloudflare Tunnel connector (Cloudflare Zero Trust -> Tunnels).
+#
+# Why: the dashboard's WebSocket guard (_ws_client_is_allowed) rejects
+# non-loopback clients when running with --insecure. cloudflared forwards the
+# tunnel's public hostname to the dashboard over http://127.0.0.1:8080, so the
+# dashboard sees a LOOPBACK peer and accepts the in-browser chat WebSocket.
+# Cloudflare Access gates the public hostname; the origin is never exposed.
+#
+# Routing (hostname -> http://localhost:8080) is configured Cloudflare-side on
+# the tunnel; token mode pulls it at runtime.
+#
+# No token -> idle (don't restart-loop); the image still runs as a plain web
+# service. With a token, s6 restarts cloudflared on crash (default longrun).
+case "${CLOUDFLARED_TUNNEL_TOKEN:-}" in
+    "")
+        echo "[cloudflared] CLOUDFLARED_TUNNEL_TOKEN unset - tunnel disabled, idling"
+        exec sleep infinity
+        ;;
+esac
+
+export HOME=/opt/data
+exec s6-setuidgid hermes cloudflared tunnel --no-autoupdate --loglevel info run --token "${CLOUDFLARED_TUNNEL_TOKEN}"
