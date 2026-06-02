@@ -1,0 +1,40 @@
+#!/command/with-contenv sh
+# shellcheck shell=sh
+# Ensure open Slack/workspace gateway access (operator decision: Kou, 2026-06-02).
+#
+# The gateway's _is_user_authorized (gateway/run.py) only honours the global
+# GATEWAY_ALLOW_ALL_USERS flag when NO per-platform / global allowlist is set
+# (see the `not platform_allowlist and ... and not global_allowlist` guard).
+# The dashboard Slack-setup flow can leave a SLACK_ALLOWED_USERS allowlist in
+# $HERMES_HOME/.env, which silently disables allow-all and forces every
+# unrecognised user through the pairing-code gate.
+#
+# This hook runs as root on every container boot (lexicographically after
+# 02-reconcile-profiles, before s6-rc starts the gateway). It strips any
+# *_ALLOWED_USERS allowlist that would suppress the allow-all path and
+# (re)asserts GATEWAY_ALLOW_ALL_USERS=true in the persistent .env, so the whole
+# Slack workspace can reach Kai with no pairing. ONLY the matched ALLOW* lines
+# are touched -- SLACK_BOT_TOKEN / SLACK_APP_TOKEN and every other secret are
+# preserved.
+#
+# Idempotent and best-effort: every step is guarded so a transient failure can
+# never brick container boot (no `set -e`). To later restrict access, remove
+# this hook (and the matching Dockerfile COPY) and rebuild.
+
+ENV_FILE="${HERMES_HOME:-/opt/data}/.env"
+
+# Create the file if the volume has none yet, so the append below has a target.
+[ -f "$ENV_FILE" ] || : > "$ENV_FILE" 2>/dev/null || true
+
+# Drop allowlists that would suppress global allow-all, plus any prior
+# GATEWAY_ALLOW_ALL_USERS line we are about to re-add (keeps this idempotent).
+sed -i -E '/^[[:space:]]*(SLACK_ALLOWED_USERS|GATEWAY_ALLOWED_USERS|GATEWAY_ALLOW_ALL_USERS)[[:space:]]*=/d' "$ENV_FILE" 2>/dev/null || true
+
+# Re-assert open access. Leading newline guards a missing trailing newline on
+# the prior last line of .env.
+printf '\nGATEWAY_ALLOW_ALL_USERS=true\n' >> "$ENV_FILE" 2>/dev/null || true
+
+# The gateway runs as UID 10000 (hermes); keep the file readable by it.
+chown hermes:hermes "$ENV_FILE" 2>/dev/null || true
+
+echo "[03-ensure-gateway-access] asserted GATEWAY_ALLOW_ALL_USERS=true (allowlist stripped) in $ENV_FILE"

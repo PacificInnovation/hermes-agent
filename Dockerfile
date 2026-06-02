@@ -232,6 +232,10 @@ RUN mkdir -p /etc/cont-init.d && \
     chmod +x /etc/cont-init.d/01-hermes-setup
 COPY --chmod=0755 docker/cont-init.d/015-supervise-perms /etc/cont-init.d/015-supervise-perms
 COPY --chmod=0755 docker/cont-init.d/02-reconcile-profiles /etc/cont-init.d/02-reconcile-profiles
+# 03-ensure-gateway-access asserts open Slack/workspace access in the
+# persistent $HERMES_HOME/.env (GATEWAY_ALLOW_ALL_USERS=true, allowlist
+# stripped) so the whole workspace reaches Kai without the pairing gate.
+COPY --chmod=0755 docker/cont-init.d/03-ensure-gateway-access /etc/cont-init.d/03-ensure-gateway-access
 
 # ---------- Runtime ----------
 ENV HERMES_WEB_DIST=/opt/hermes/hermes_cli/web_dist
