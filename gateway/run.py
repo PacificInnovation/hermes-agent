@@ -18763,6 +18763,25 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     )
     cron_thread.start()
     
+    # Kai gateway ingest server (Sprint 24 Phase 2-brains): always-on aiohttp
+    # endpoint on Railway's $PORT that the unified Kai Slack gateway forwards
+    # acquisitions-routed events to. Inert (503) until GATEWAY_BRAIN_SECRET is
+    # set; not started when $PORT is unset (local dev) so it can't clash. Failure
+    # to bind is non-fatal — the ingest is additive, the gateway keeps running.
+    kai_ingest_server = None
+    _kai_ingest_port = os.environ.get("PORT")
+    if _kai_ingest_port:
+        try:
+            from gateway.kai_ingest import KaiIngestServer
+
+            kai_ingest_server = KaiIngestServer(
+                runner, host="0.0.0.0", port=int(_kai_ingest_port)
+            )
+            await kai_ingest_server.start()
+        except Exception as e:
+            logger.error("[slack-ingest] failed to start ingest server: %s", e)
+            kai_ingest_server = None
+
     # Wait for shutdown
     await runner.wait_for_shutdown()
 
@@ -18774,6 +18793,13 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     # Stop cron ticker cleanly
     cron_stop.set()
     cron_thread.join(timeout=5)
+
+    # Stop the Kai ingest server (if it was started).
+    if kai_ingest_server is not None:
+        try:
+            await kai_ingest_server.stop()
+        except Exception as e:
+            logger.debug("[slack-ingest] stop failed: %s", e)
 
     # Stop the planned-stop watcher (daemon=True so this is belt-and-suspenders).
     _planned_stop_watcher_stop.set()
