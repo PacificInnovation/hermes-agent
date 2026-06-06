@@ -302,13 +302,16 @@ async def test_health(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_maybe_start_returns_none_without_port(monkeypatch):
-    monkeypatch.delenv("PORT", raising=False)
+    # Dormant unless KAI_INGEST_PORT is set (it does NOT use $PORT — the
+    # dashboard owns that on Railway). $PORT being set must NOT start it.
+    monkeypatch.delenv("KAI_INGEST_PORT", raising=False)
+    monkeypatch.setenv("PORT", "8080")
     assert await maybe_start_ingest(_FakeRunner()) is None
 
 
 @pytest.mark.asyncio
 async def test_maybe_start_binds_and_stop_cleans_up(monkeypatch):
-    monkeypatch.setenv("PORT", "0")  # 0 → OS assigns a free ephemeral port
+    monkeypatch.setenv("KAI_INGEST_PORT", "0")  # 0 → OS assigns a free ephemeral port
     server = await maybe_start_ingest(_FakeRunner())
     assert server is not None
     await stop_ingest(server)  # must not raise

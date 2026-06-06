@@ -222,7 +222,7 @@ merge — no force-push for Path C.)
 5. **Test the deploy surface, not just code** — that's where upstream drift bites:
    `Dockerfile`, `docker/s6-rc.d/*`, `main-wrapper.sh`, cloudflared sidecar, `$PORT`,
    Slack `SLACK_BOT_TOKEN`/`SLACK_APP_TOKEN`, `GATEWAY_BRAIN_SECRET`. Our deploy
-   commits + the ingest's `$PORT` bind live exactly here.
+   commits + the ingest's `KAI_INGEST_PORT` bind live exactly here.
 6. **Deploy to a Railway STAGING service first.** Don't swap prod until staging is green.
 7. **Keep the Kiraku delta isolated** (new files + one-line hooks) — that's what
    makes re-baseline cheap.
@@ -240,7 +240,9 @@ merge — no force-push for Path C.)
 - [ ] Slack connects (Socket Mode) and the bot answers a test `@Kai` in a staging
       channel.
 - [ ] cloudflared tunnel comes up (if the dashboard is exercised).
-- [ ] Kai ingest reachable on `$PORT`: `GET /health` → 200; `POST /ingest/slack`
+- [ ] Kai ingest reachable on `KAI_INGEST_PORT` (a dedicated port, NOT `$PORT` —
+      the dashboard owns `$PORT`; set `KAI_INGEST_PORT` + expose it to enable):
+      `GET /health` → 200; `POST /ingest/slack`
       with no secret set → **503** (fail-closed). With `GATEWAY_BRAIN_SECRET` set +
       a valid signed envelope → **200 dispatched**.
 - [ ] `python -m pytest tests/gateway/ --timeout-method=thread` green.
