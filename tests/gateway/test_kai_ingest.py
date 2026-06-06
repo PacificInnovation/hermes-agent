@@ -255,6 +255,38 @@ async def test_503_when_slack_adapter_absent(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_skips_event_without_ts(monkeypatch):
+    # An inner event with no top-level `ts` would bypass hermes' ts-keyed dedup,
+    # so the ingest rejects it rather than inject an undedupable event.
+    monkeypatch.setenv("GATEWAY_BRAIN_SECRET", SECRET)
+    slack = _FakeSlack()
+    async with TestClient(TestServer(_app(_FakeRunner(slack)))) as client:
+        body = json.dumps(
+            {"type": "event_callback", "team_id": "T1", "event": {"type": "reaction_added", "user": "U1"}}
+        ).encode("utf-8")
+        resp = await client.post("/ingest/slack", data=body, headers=_signed_headers(body))
+        assert resp.status == 200
+        assert await resp.json() == {"ok": True, "skipped": "no_ts"}
+    assert slack.events == []
+
+
+@pytest.mark.asyncio
+async def test_502_when_dispatch_raises(monkeypatch):
+    # A transient failure in the Slack pipeline must surface as 5xx so the
+    # gateway re-forwards (at-least-once), not be swallowed after a 200.
+    monkeypatch.setenv("GATEWAY_BRAIN_SECRET", SECRET)
+
+    class _RaisingSlack:
+        async def _handle_slack_message(self, event):
+            raise RuntimeError("slack api down")
+
+    async with TestClient(TestServer(_app(_FakeRunner(_RaisingSlack())))) as client:
+        body = _env_body()
+        resp = await client.post("/ingest/slack", data=body, headers=_signed_headers(body))
+        assert resp.status == 502
+
+
+@pytest.mark.asyncio
 async def test_health(monkeypatch):
     async with TestClient(TestServer(_app(_FakeRunner()))) as client:
         resp = await client.get("/health")

@@ -21,7 +21,6 @@ cutover (else events double-process — though hermes also dedups by event ``ts`
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import hmac
 import json
@@ -29,7 +28,7 @@ import logging
 import os
 import re
 import time
-from typing import Callable, Optional, Set
+from typing import Callable, Optional
 
 try:
     from aiohttp import web
@@ -126,11 +125,12 @@ class KaiIngestServer:
         self._host = host
         self._port = port
         self._app_runner = None  # web.AppRunner once started
-        self._bg: Set[asyncio.Task] = set()
 
     def build_app(self):
         """Build the aiohttp application (separated out for testability)."""
-        app = web.Application()
+        # client_max_size matches our cap so aiohttp rejects oversized bodies as
+        # HTTPRequestEntityTooLarge (-> 413 below) rather than truncating.
+        app = web.Application(client_max_size=MAX_BODY_BYTES)
         app.router.add_get("/health", self._handle_health)
         app.router.add_post("/ingest/slack", self._handle_ingest)
         return app
@@ -171,6 +171,8 @@ class KaiIngestServer:
             return web.json_response({"error": "payload too large"}, status=413)
         try:
             raw_body = await request.read()
+        except web.HTTPRequestEntityTooLarge:
+            return web.json_response({"error": "payload too large"}, status=413)
         except Exception as e:  # pragma: no cover - aiohttp read failure
             logger.error("[slack-ingest] failed to read body: %s", e)
             return web.json_response({"error": "bad request"}, status=400)
@@ -198,6 +200,15 @@ class KaiIngestServer:
         ):
             return web.json_response({"ok": True, "skipped": "not_event_callback"})
 
+        # Require a non-empty inner-event `ts`: it is the downstream dedup key
+        # (slack.py). An event with no top-level `ts` (e.g. a reaction or a
+        # synthetic event — only `item.ts`) would bypass dedup and reprocess on
+        # every at-least-once re-forward (the 502 path amplifies this). The
+        # gateway forwards only ts-bearing message/app_mention today, but reject
+        # here so the ingest can never inject an undedupable event.
+        if not event.get("ts"):
+            return web.json_response({"ok": True, "skipped": "no_ts"})
+
         # 5. Reach the live Slack adapter. Retryable 503 if it isn't connected
         #    (hermes is up, but the Slack platform hasn't come up yet).
         slack = self._runner.adapters.get(Platform.SLACK)
@@ -216,13 +227,21 @@ class KaiIngestServer:
             if team_id:
                 inner["team_id"] = team_id
 
-        # create_task + ack: handle_message itself returns fast (it spawns the
-        # agent turn as a background task), but _handle_slack_message does
-        # pre-dispatch I/O (thread-context fetch, media download). Decouple the
-        # ack from that, mirroring the webhook adapter. A failure inside the task
-        # is logged; the gateway's at-least-once + the `ts` dedup cover redelivery.
-        task = asyncio.create_task(slack._handle_slack_message(inner))
-        self._bg.add(task)
-        task.add_done_callback(self._bg.discard)
+        # handle_message ENQUEUES (it spawns the agent turn as a background task
+        # and returns fast), so awaiting _handle_slack_message blocks only on
+        # bounded work — pre-dispatch I/O (thread-context fetch, media download),
+        # the enqueue, and (for an already-active session) a quick command
+        # handler — NOT a fresh LLM turn. Await it so a transient failure surfaces
+        # as 502 and the gateway re-forwards: at-least-once parity with the jarvis
+        # ingest, vs create_task which would drop a pre-enqueue failure after the
+        # gateway already booked a 200. Slack's redeliveries (and any timeout-
+        # driven gateway retry) collapse downstream via the inner-event `ts` dedup.
+        try:
+            await slack._handle_slack_message(inner)
+        except Exception as e:
+            logger.error(
+                "[slack-ingest] dispatch failed: %s (event ts=%s)", e, inner.get("ts")
+            )
+            return web.json_response({"error": "downstream dispatch failed"}, status=502)
 
         return web.json_response({"ok": True, "dispatched": True})
