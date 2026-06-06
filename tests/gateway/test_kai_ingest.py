@@ -21,6 +21,8 @@ from gateway import kai_ingest
 from gateway.kai_ingest import (
     GATEWAY_SIG_REPLAY_WINDOW_SEC,
     KaiIngestServer,
+    maybe_start_ingest,
+    stop_ingest,
     verify_gateway_signature,
 )
 
@@ -292,3 +294,26 @@ async def test_health(monkeypatch):
         resp = await client.get("/health")
         assert resp.status == 200
         assert (await resp.json())["status"] == "ok"
+
+
+# --------------------------------------------------------------------------- #
+# Lifecycle helper tests
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.asyncio
+async def test_maybe_start_returns_none_without_port(monkeypatch):
+    monkeypatch.delenv("PORT", raising=False)
+    assert await maybe_start_ingest(_FakeRunner()) is None
+
+
+@pytest.mark.asyncio
+async def test_maybe_start_binds_and_stop_cleans_up(monkeypatch):
+    monkeypatch.setenv("PORT", "0")  # 0 → OS assigns a free ephemeral port
+    server = await maybe_start_ingest(_FakeRunner())
+    assert server is not None
+    await stop_ingest(server)  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_stop_ingest_is_none_safe():
+    await stop_ingest(None)  # no-op, must not raise

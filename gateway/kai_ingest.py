@@ -245,3 +245,40 @@ class KaiIngestServer:
             return web.json_response({"error": "downstream dispatch failed"}, status=502)
 
         return web.json_response({"ok": True, "dispatched": True})
+
+
+# --------------------------------------------------------------------------- #
+# Lifecycle helpers — keep gateway/run.py's footprint to two one-line calls so
+# an upstream re-baseline has nothing to reconcile here (see docs/UPSTREAM-SYNC.md).
+# --------------------------------------------------------------------------- #
+
+
+async def maybe_start_ingest(runner) -> "Optional[KaiIngestServer]":
+    """Start the ingest server bound to Railway's ``$PORT``, or return ``None``.
+
+    Skips when ``$PORT`` is unset (local dev). All failures (non-numeric port,
+    bind error, aiohttp missing) are NON-FATAL: log and return ``None`` so the
+    gateway keeps running — the ingest is additive. Call from
+    ``start_gateway`` after ``runner.start()``; pair with ``stop_ingest`` in
+    teardown.
+    """
+    port = os.environ.get("PORT")
+    if not port:
+        return None
+    try:
+        server = KaiIngestServer(runner, host="0.0.0.0", port=int(port))
+        await server.start()
+        return server
+    except Exception as e:
+        logger.error("[slack-ingest] failed to start ingest server: %s", e)
+        return None
+
+
+async def stop_ingest(server: "Optional[KaiIngestServer]") -> None:
+    """None-safe teardown for the server returned by ``maybe_start_ingest``."""
+    if server is None:
+        return
+    try:
+        await server.stop()
+    except Exception as e:
+        logger.debug("[slack-ingest] stop failed: %s", e)
