@@ -18763,6 +18763,15 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     )
     cron_thread.start()
     
+    # Kai gateway ingest server (Sprint 24 Phase 2-brains): always-on aiohttp
+    # endpoint on $PORT the unified Slack gateway forwards acq events to. All
+    # logic lives in gateway/kai_ingest.py (a NEW file) so this footprint stays
+    # two one-line calls — minimal to reconcile on an upstream re-baseline
+    # (see docs/UPSTREAM-SYNC.md). Inert (503) until GATEWAY_BRAIN_SECRET is set.
+    from gateway.kai_ingest import maybe_start_ingest, stop_ingest
+
+    kai_ingest_server = await maybe_start_ingest(runner)
+
     # Wait for shutdown
     await runner.wait_for_shutdown()
 
@@ -18774,6 +18783,9 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     # Stop cron ticker cleanly
     cron_stop.set()
     cron_thread.join(timeout=5)
+
+    # Stop the Kai ingest server (if it was started).
+    await stop_ingest(kai_ingest_server)
 
     # Stop the planned-stop watcher (daemon=True so this is belt-and-suspenders).
     _planned_stop_watcher_stop.set()
