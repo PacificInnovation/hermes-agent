@@ -12,42 +12,62 @@ Kiraku-specific code (the unified Kai gateway ingest + deploy tweaks).
 
 ## TL;DR
 
-- Our fork is a **frozen old snapshot** of upstream + a tiny Kiraku delta. It does
-  **not** track upstream; nothing flows in automatically.
-- **Default: don't sync.** If hermes works for acquisitions, leave it. Frozen is fine.
-- **Never `git merge upstream/main` onto `railway-deploy` directly** — it's a 10k+
-  commit storm and `railway-deploy` is prod.
+- Our fork branches from a **tagged upstream release** + a tiny Kiraku delta
+  (kai_ingest + Railway deploy commits). It tracks upstream **only via explicit
+  merges** — nothing flows in automatically.
+- Histories are **related** (shared upstream base), so **`git merge upstream/main`
+  works cleanly.** The gap from a release tag is modest, so a merge is the normal,
+  manageable path — not a re-fork.
+- **Default: don't sync.** If hermes works for acquisitions, leave it.
 - Want one upstream fix → **cherry-pick** (Path A).
-- Want to modernize wholesale → **re-baseline** by replaying our small delta onto
-  fresh upstream (Path B), validated on a Railway staging service, once.
-- Our delta is intentionally tiny + isolated so re-baseline is cheap (see below).
+- Want to modernize wholesale → **merge `upstream/main`** into a sync branch,
+  validate on a Railway staging service, then force-with-lease to prod (Path B).
+- Stay current afterward → **periodic small merges** (Path C).
+- **Never merge onto `railway-deploy` directly** (it's prod). Always sync branch →
+  staging → guarded push.
 
 ---
 
-## Where we stand (the numbers)
+## Where we stand
 
-`railway-deploy` vs `upstream/main` (NousResearch), as of 2026-06-06:
+- **Fork base:** upstream **v0.15.1** (`e71a2bd11`, 2026-05-28).
+- **Modernized to v0.16.0** on **2026-06-06** via `sync-upstream-20260606`
+  (`git merge upstream/main`; the merge that established this doc's Path-B flow).
+- **Kiraku delta:** ~10 commits / ~16 files — `gateway/kai_ingest.py` (+ test) and
+  the Railway/Cloudflare deploy commits (cont-init, cloudflared sidecar, no-VOLUME,
+  single-service Dockerfile). The version/packaging commits were **subsumed by
+  upstream** (it adopted the same plugin.yaml bundling), so they drop out on merge.
 
+Re-measure the real gap anytime — **from a FULL clone** (see the warning below):
+
+```bash
+git fetch origin --prune --tags && git fetch upstream --prune
+BASE=$(git merge-base origin/railway-deploy upstream/main)
+git log -1 --format='base: %h %s (%ci)' "$BASE"
+echo "behind: $(git rev-list --count "$BASE"..upstream/main)   ahead: $(git rev-list --count "$BASE"..origin/railway-deploy)"
 ```
-ahead  (our commits not upstream):        3   (+ the kai_ingest PR)
-behind (upstream commits not in ours): 10,746
-```
 
-So `railway-deploy` = an **old upstream snapshot** + 3 PacificInnovation deploy
-commits + the Kai ingest. Upstream has moved ~10.7k commits since our base.
-A naive merge would drag all of that in at once.
+> ⚠️ **Shallow-clone trap (this bit us once).** On a shallow clone, `git merge-base`
+> returns empty and the counts are garbage — it once reported "10,746 behind /
+> unrelated histories," which was **false** (the real gap from v0.15.1 was ~925).
+> Always `git fetch --unshallow origin` first; verify with
+> `git rev-parse --is-shallow-repository` → `false`. Never plan a sync off shallow numbers.
 
 `railway-deploy` is what Railway builds (`railway.json` → `Dockerfile`). It is **prod**.
 
 ---
 
-## The principle: replay OUR delta, don't merge THEIRS
+## The principle: small, frequent, related-history merges
 
-Merging `upstream/main` *into* our old base = reconcile 10,746 commits against our
-snapshot = conflict storm + a huge untested surface change.
+Because the fork shares an upstream base, a straight **`git merge upstream/main`**
+brings in only the commits since our base and resolves conflicts **once**, in the
+union of files both sides touched (mostly version/packaging + our deploy files).
+Keep the gap small (Path C) and each merge stays a quick, low-conflict operation.
 
-**Invert it.** Our Kiraku delta is small and isolated. Replay those few changes
-*onto* fresh upstream. You reconcile ~a handful of changes, not ten thousand.
+Our Kiraku delta is deliberately **new files + one-line hooks** (e.g. kai_ingest is a
+new module; run.py gains two lines) so the shared-file conflict surface is tiny.
+A linear re-baseline (replay the delta onto fresh upstream) is an option if you want
+linear history, but with related history a merge is simpler and is what Path C uses.
 
 ---
 
@@ -100,47 +120,55 @@ way — no force-push.)
 
 ---
 
-## Path B — re-baseline (modernize wholesale, once)
+## Path B — modernize wholesale via merge (what the v0.16.0 sync did)
 
-Replays our delta onto modern upstream instead of merging upstream onto our base.
-**This force-updates the prod branch at the end — do the staging validation first.**
+Merge `upstream/main` into a sync branch, validate on staging, then force-with-lease
+to prod. **This force-updates the prod branch at the end — do the staging validation first.**
 
 ```bash
 git fetch origin --prune --tags && git fetch upstream --prune
 
 # 1. Tag + PUSH the current known-good prod (a LOCAL tag does NOT protect the remote).
 TAG=railway-deploy-good-$(date +%Y%m%d-%H%M)
-git tag -a "$TAG" origin/railway-deploy -m "Known-good Railway deploy before re-baseline"
+git tag -a "$TAG" origin/railway-deploy -m "Known-good Railway deploy before merge"
 git push origin "refs/tags/$TAG"
-GOOD_SHA=$(git rev-parse origin/railway-deploy)   # remember this; it's the rollback target
+GOOD_SHA=$(git rev-parse origin/railway-deploy)   # rollback target
 
-# 2. Start fresh from modern upstream.
-git switch -c rebaseline upstream/main
+# 2. Sync branch off CURRENT prod, then merge upstream.
+git switch -c sync-upstream-$(date +%Y%m%d) origin/railway-deploy
+git merge --no-edit upstream/main
+#    Resolve conflicts — they cluster in version/packaging + our deploy files:
+#      - version strings + packaging upstream now owns -> take UPSTREAM
+#      - our Kiraku deploy bits (Dockerfile no-VOLUME / cont-init / cloudflared)
+#        and kai_ingest -> KEEP ours (these usually AUTO-MERGE; new files never conflict)
+#    Resolve each hunk by hand (don't `checkout --theirs` whole files — that drops
+#    auto-merged Kiraku lines). Then: git add <resolved> && git commit --no-edit
 
-# 3. Replay the Kiraku delta (small!): deploy commits, then the ingest commits.
-git cherry-pick -x <deploy-commit-shas...>
-git cherry-pick -x <kai_ingest-commit-shas...>
-#    Conflicts only where upstream moved the files we touch (run.py start_gateway
-#    region, Dockerfile, s6 scripts). kai_ingest.py/test apply clean unless upstream
-#    added those paths. On conflict: resolve → git add → git cherry-pick --continue.
+# 3. RE-VERIFY the kai_ingest contract against the merged (modern) tree — 925 commits
+#    can move internals. Confirm in gateway/platforms/slack.py + base.py that
+#    _handle_slack_message still takes the INNER event dict, reads team from it,
+#    dedups by `ts`, and handle_message still ENQUEUES (spawns a background task).
+#    (For v0.16.0 these all held unchanged — kai_ingest needed no edits.)
+python -m pytest tests/gateway/test_kai_ingest.py --timeout-method=thread   # Windows: thread timer
 
 # 4. Validate HARD on a Railway STAGING service (see checklist) BEFORE touching prod.
-git push -u origin rebaseline    # point a STAGING Railway service at this branch
+git push -u origin "$(git branch --show-current)"   # point a STAGING service at this branch
 
 # 5. Only after staging is green: force-update prod with a LEASE (never plain --force).
 #    --force-with-lease aborts if the remote moved since GOOD_SHA (someone else pushed).
 git push --force-with-lease=refs/heads/railway-deploy:"$GOOD_SHA" \
-    origin rebaseline:refs/heads/railway-deploy
+    origin HEAD:refs/heads/railway-deploy
 ```
 
-Why it's safe: you reconcile our ~handful of changes, not upstream's 10k. The
-ingest is new files (no conflict); only the run.py one-liners + the Docker/s6
-deploy bits might need a re-apply against upstream's newer structure. The lease +
-pushed tag make step 5 reversible.
+Why a merge (not a linear re-baseline): histories share an upstream base, so the
+merge brings in only the post-base commits and resolves conflicts **once**. Our
+delta is new files + one-line hooks, so the shared-file conflict surface is tiny.
+The pushed tag + lease make step 5 reversible. *(Want linear history instead? Replay
+the delta onto fresh upstream with `git cherry-pick -x` — same end state, more
+conflict points.)*
 
 > **Pre-prod pause:** force-updating `railway-deploy` triggers a Railway **prod**
-> deploy if GitHub autodeploy is on. Don't run step 5 until staging is green and
-> you're ready for prod to redeploy.
+> deploy if GitHub autodeploy is on. Don't run step 5 until staging is green.
 
 ---
 
