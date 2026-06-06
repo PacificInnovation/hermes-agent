@@ -254,15 +254,19 @@ class KaiIngestServer:
 
 
 async def maybe_start_ingest(runner) -> "Optional[KaiIngestServer]":
-    """Start the ingest server bound to Railway's ``$PORT``, or return ``None``.
+    """Start the ingest server bound to ``KAI_INGEST_PORT``, or return ``None``.
 
-    Skips when ``$PORT`` is unset (local dev). All failures (non-numeric port,
-    bind error, aiohttp missing) are NON-FATAL: log and return ``None`` so the
-    gateway keeps running — the ingest is additive. Call from
-    ``start_gateway`` after ``runner.start()``; pair with ``stop_ingest`` in
-    teardown.
+    Uses a DEDICATED ``KAI_INGEST_PORT`` — NOT Railway's ``$PORT``. On Railway the
+    primary public service (the dashboard, behind the cloudflared tunnel) already
+    binds ``$PORT`` (8080), so sharing it fails with ``Errno 98`` (#address-in-use).
+    Skips when ``KAI_INGEST_PORT`` is unset — which is the default, keeping the
+    ingest DORMANT until the gateway cutover deliberately sets it (and exposes
+    that port in Railway → the gateway's ``BRAIN_ACQ_URL`` points there). All
+    failures (non-numeric port, bind error, aiohttp missing) are NON-FATAL: log
+    and return ``None`` so the gateway keeps running — the ingest is additive.
+    Call from ``start_gateway`` after ``runner.start()``; pair with ``stop_ingest``.
     """
-    port = os.environ.get("PORT")
+    port = os.environ.get("KAI_INGEST_PORT")
     if not port:
         return None
     try:
