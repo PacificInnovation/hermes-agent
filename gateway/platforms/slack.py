@@ -739,9 +739,21 @@ class SlackAdapter(BasePlatformAdapter):
         if not raw_token:
             logger.error("[Slack] SLACK_BOT_TOKEN not set")
             return False
-        if not app_token:
-            logger.error("[Slack] SLACK_APP_TOKEN not set")
-            return False
+        # SLACK_APP_TOKEN (xapp-) is ONLY needed for Socket Mode. When it is
+        # absent we run INGEST-ONLY: still build the per-workspace WebClients
+        # from SLACK_BOT_TOKEN (so the bot can POST replies), but skip the
+        # socket. Inbound events then arrive via the Kai gateway's signed HTTP
+        # ingest (gateway/kai_ingest.py) instead of a Socket Mode connection —
+        # the unified-gateway model (one Slack app's events fan out over HTTP;
+        # opening a second socket here would double-deliver every event). With
+        # the token present, behaviour is unchanged: full Socket Mode.
+        socket_mode = bool(app_token)
+        if not socket_mode:
+            logger.warning(
+                "[Slack] SLACK_APP_TOKEN not set — INGEST-ONLY mode: building "
+                "post-clients from SLACK_BOT_TOKEN, Socket Mode disabled "
+                "(inbound events arrive via the Kai gateway /ingest/slack)"
+            )
 
         proxy_url = _resolve_slack_proxy_url()
         if proxy_url:
@@ -777,11 +789,15 @@ class SlackAdapter(BasePlatformAdapter):
 
         lock_acquired = False
         try:
-            if not self._acquire_platform_lock(
-                "slack-app-token", app_token, "Slack app token"
-            ):
-                return False
-            lock_acquired = True
+            # The platform lock guards the singleton Socket Mode connection
+            # (keyed on the app token). Ingest-only has no socket to contend
+            # for, so there is nothing to lock.
+            if socket_mode:
+                if not self._acquire_platform_lock(
+                    "slack-app-token", app_token, "Slack app token"
+                ):
+                    return False
+                lock_acquired = True
             self._running = False
 
             # Tear down any prior reconnect state before flipping ``_running``
@@ -948,22 +964,33 @@ class SlackAdapter(BasePlatformAdapter):
             # observes the live task immediately; on any failure here we tear
             # down whatever we managed to start, leave ``_running=False``, and
             # let the ``finally`` block release the platform lock cleanly.
-            try:
-                self._start_socket_mode_handler()
-                self._running = True
-                self._ensure_socket_watchdog()
-            except Exception:
-                self._running = False
+            if socket_mode:
                 try:
-                    await self._stop_socket_mode_handler()
-                except Exception:  # pragma: no cover - defensive logging
-                    logger.debug(
-                        "[Slack] Cleanup after failed start raised", exc_info=True
-                    )
-                raise
+                    self._start_socket_mode_handler()
+                    self._running = True
+                    self._ensure_socket_watchdog()
+                except Exception:
+                    self._running = False
+                    try:
+                        await self._stop_socket_mode_handler()
+                    except Exception:  # pragma: no cover - defensive logging
+                        logger.debug(
+                            "[Slack] Cleanup after failed start raised", exc_info=True
+                        )
+                    raise
+            else:
+                # Ingest-only: no socket to start. The adapter is "live" once
+                # the post-clients are built; events arrive via the gateway
+                # HTTP ingest, replies go out through the per-team WebClients.
+                self._running = True
 
             logger.info(
-                "[Slack] Socket Mode connected (%d workspace(s))",
+                "[Slack] %s (%d workspace(s))",
+                (
+                    "Socket Mode connected"
+                    if socket_mode
+                    else "Ingest-only mode — Socket Mode disabled (no SLACK_APP_TOKEN)"
+                ),
                 len(self._team_clients),
             )
             return True

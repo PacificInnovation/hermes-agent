@@ -3736,3 +3736,84 @@ class TestSlashEphemeralAck:
         # the normal single-user case; the ContextVar path is the precise one.
         # The key invariant is: when the ContextVar IS set, it matches exactly.
         assert ctx is not None  # fallback path finds the entry
+
+
+class TestSlackIngestOnlyMode:
+    """connect() without SLACK_APP_TOKEN runs INGEST-ONLY: it still builds the
+    per-workspace post-clients from SLACK_BOT_TOKEN and returns True, but does
+    NOT open a Socket Mode connection — inbound events arrive via the Kai gateway
+    HTTP ingest (gateway/kai_ingest.py). Regression guard for unified-gateway
+    acq routing: without this, a missing app token made connect() return False
+    before building _team_clients, so the bot could never POST a reply."""
+
+    def _mock_app(self):
+        app = MagicMock()
+        app.event = lambda *a, **k: (lambda fn: fn)
+        app.command = lambda *a, **k: (lambda fn: fn)
+        app.action = lambda *a, **k: (lambda fn: fn)
+        app.client = AsyncMock()
+        return app
+
+    def _mock_web_client(self):
+        wc = AsyncMock()
+        wc.auth_test = AsyncMock(
+            return_value={
+                "user_id": "U_BOT",
+                "user": "testbot",
+                "team_id": "T_FAKE",
+                "team": "FakeTeam",
+            }
+        )
+        return wc
+
+    def test_connect_without_app_token_is_ingest_only(self):
+        adapter = SlackAdapter(PlatformConfig(enabled=True, token="xoxb-fake"))
+        mock_app = self._mock_app()
+        mock_web_client = self._mock_web_client()
+
+        with (
+            patch.object(_slack_mod, "AsyncApp", return_value=mock_app),
+            patch.object(_slack_mod, "AsyncWebClient", return_value=mock_web_client),
+            patch.object(adapter, "_start_socket_mode_handler") as start_socket,
+            patch.object(adapter, "_ensure_socket_watchdog") as ensure_watchdog,
+            patch(
+                "gateway.status.acquire_scoped_lock", return_value=(True, None)
+            ) as acq_lock,
+            patch.dict(os.environ, {}, clear=False),
+        ):
+            os.environ.pop("SLACK_APP_TOKEN", None)
+            result = asyncio.run(adapter.connect())
+
+        # Adapter comes up live...
+        assert result is True
+        assert adapter._running is True
+        # ...with the post-client built from SLACK_BOT_TOKEN (so replies POST)...
+        assert adapter._team_clients.get("T_FAKE") is mock_web_client
+        assert adapter._team_bot_user_ids.get("T_FAKE") == "U_BOT"
+        assert adapter._bot_user_id == "U_BOT"
+        # ...but NO socket: handler never started, no watchdog, no platform lock.
+        start_socket.assert_not_called()
+        ensure_watchdog.assert_not_called()
+        acq_lock.assert_not_called()
+
+    def test_connect_with_app_token_still_starts_socket(self):
+        """Regression: with SLACK_APP_TOKEN present, Socket Mode is unchanged."""
+        adapter = SlackAdapter(PlatformConfig(enabled=True, token="xoxb-fake"))
+        mock_app = self._mock_app()
+        mock_web_client = self._mock_web_client()
+
+        with (
+            patch.object(_slack_mod, "AsyncApp", return_value=mock_app),
+            patch.object(_slack_mod, "AsyncWebClient", return_value=mock_web_client),
+            patch.object(adapter, "_start_socket_mode_handler") as start_socket,
+            patch.object(adapter, "_ensure_socket_watchdog"),
+            patch("gateway.status.acquire_scoped_lock", return_value=(True, None)),
+            patch.dict(os.environ, {"SLACK_APP_TOKEN": "xapp-fake"}),
+        ):
+            result = asyncio.run(adapter.connect())
+
+        assert result is True
+        assert adapter._running is True
+        # Socket Mode path still fires when the app token is present.
+        start_socket.assert_called_once()
+        assert adapter._team_clients.get("T_FAKE") is mock_web_client
