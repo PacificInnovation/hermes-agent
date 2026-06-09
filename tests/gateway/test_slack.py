@@ -3817,3 +3817,51 @@ class TestSlackIngestOnlyMode:
         # Socket Mode path still fires when the app token is present.
         start_socket.assert_called_once()
         assert adapter._team_clients.get("T_FAKE") is mock_web_client
+
+    def test_disconnect_after_ingest_only_does_not_error(self):
+        """disconnect() must be safe when no socket / watchdog / platform lock
+        was ever created (ingest-only)."""
+        adapter = SlackAdapter(PlatformConfig(enabled=True, token="xoxb-fake"))
+        mock_app = self._mock_app()
+        mock_web_client = self._mock_web_client()
+
+        with (
+            patch.object(_slack_mod, "AsyncApp", return_value=mock_app),
+            patch.object(_slack_mod, "AsyncWebClient", return_value=mock_web_client),
+            patch.object(adapter, "_start_socket_mode_handler"),
+            patch.object(adapter, "_ensure_socket_watchdog"),
+            patch("gateway.status.acquire_scoped_lock", return_value=(True, None)),
+            patch.dict(os.environ, {}, clear=False),
+        ):
+            os.environ.pop("SLACK_APP_TOKEN", None)
+            assert asyncio.run(adapter.connect()) is True
+            # No socket / watchdog / lock exist — disconnect must no-op cleanly.
+            asyncio.run(adapter.disconnect())
+
+        assert adapter._running is False
+
+    def test_ingest_only_reply_routes_to_team_client(self):
+        """The payoff: once an ingest-delivered event maps a channel to its
+        team (set by _handle_slack_message), _get_client returns that
+        workspace's WebClient — the bot that can POST — not the primary-app
+        fallback. This is the exact bug the PR fixes (no post-client = no reply)."""
+        adapter = SlackAdapter(PlatformConfig(enabled=True, token="xoxb-fake"))
+        mock_app = self._mock_app()
+        mock_web_client = self._mock_web_client()
+
+        with (
+            patch.object(_slack_mod, "AsyncApp", return_value=mock_app),
+            patch.object(_slack_mod, "AsyncWebClient", return_value=mock_web_client),
+            patch.object(adapter, "_start_socket_mode_handler"),
+            patch.object(adapter, "_ensure_socket_watchdog"),
+            patch("gateway.status.acquire_scoped_lock", return_value=(True, None)),
+            patch.dict(os.environ, {}, clear=False),
+        ):
+            os.environ.pop("SLACK_APP_TOKEN", None)
+            assert asyncio.run(adapter.connect()) is True
+
+        # Simulate the channel→team mapping _handle_slack_message learns from
+        # the inbound gateway event, then verify reply routing resolves it.
+        adapter._channel_team["C_FAKE"] = "T_FAKE"
+        assert adapter._get_client("C_FAKE") is mock_web_client
+        assert adapter._get_client("C_FAKE") is not mock_app.client
