@@ -94,9 +94,31 @@ class TestMcpEndpoints:
         body = r.json()
         assert "entries" in body and "diagnostics" in body
         # The shipped optional-mcps/ catalog has at least one entry; each must
-        # carry the install/enabled status fields the UI relies on.
+        # carry the install/enabled status fields plus the inspection detail
+        # the dashboard renders (transport target, install source, guidance) so
+        # users can vet an entry before installing.
         for e in body["entries"]:
-            assert {"name", "transport", "installed", "enabled", "needs_install"} <= set(e)
+            assert {
+                "name",
+                "transport",
+                "auth_type",
+                "installed",
+                "enabled",
+                "needs_install",
+                "command",
+                "args",
+                "url",
+                "install_url",
+                "install_ref",
+                "bootstrap",
+                "default_enabled",
+                "post_install",
+            } <= set(e)
+            # http entries expose a url; stdio entries expose a command.
+            if e["transport"] == "http":
+                assert e["url"]
+            elif e["transport"] == "stdio":
+                assert e["command"]
 
     def test_catalog_install_unknown_404(self):
         r = self.client.post("/api/mcp/catalog/install", json={"name": "no-such-mcp-xyz"})
@@ -200,6 +222,91 @@ class TestWebhookEndpoints:
         assert data["enabled"] is False
         r = self.client.post("/api/webhooks", json={"name": "gh", "deliver": "log"})
         assert r.status_code == 400
+
+    def test_enable_platform_starts_gateway_restart(self, monkeypatch):
+        import hermes_cli.web_server as ws
+        from hermes_cli.config import load_config
+
+        ws._ACTION_PROCS.pop("gateway-restart", None)
+        restart_calls = []
+
+        class FakeRestartProc:
+            pid = 4242
+
+        def fake_spawn_action(subcommand, name):
+            restart_calls.append((subcommand, name))
+            return FakeRestartProc()
+
+        monkeypatch.setattr(ws, "_spawn_hermes_action", fake_spawn_action)
+
+        r = self.client.post("/api/webhooks/enable")
+
+        assert r.status_code == 200
+        assert r.json() == {
+            "ok": True,
+            "platform": "webhook",
+            "enabled": True,
+            "needs_restart": False,
+            "restart_started": True,
+            "restart_action": "gateway-restart",
+            "restart_pid": 4242,
+        }
+        assert restart_calls == [(["gateway", "restart"], "gateway-restart")]
+        assert load_config()["platforms"]["webhook"]["enabled"] is True
+        assert self.client.get("/api/webhooks").json()["enabled"] is True
+
+    def test_enable_platform_reports_restart_failure_after_save(self, monkeypatch):
+        import hermes_cli.web_server as ws
+        from hermes_cli.config import load_config
+
+        ws._ACTION_PROCS.pop("gateway-restart", None)
+
+        def fail_spawn_action(subcommand, name):
+            assert subcommand == ["gateway", "restart"]
+            assert name == "gateway-restart"
+            raise RuntimeError("supervisor unavailable")
+
+        monkeypatch.setattr(ws, "_spawn_hermes_action", fail_spawn_action)
+
+        r = self.client.post("/api/webhooks/enable")
+
+        assert r.status_code == 200
+        data = r.json()
+        assert data["ok"] is True
+        assert data["platform"] == "webhook"
+        assert data["enabled"] is True
+        assert data["needs_restart"] is True
+        assert data["restart_started"] is False
+        assert "supervisor unavailable" in data["restart_error"]
+        assert load_config()["platforms"]["webhook"]["enabled"] is True
+
+    def test_enable_platform_reuses_inflight_gateway_restart(self, monkeypatch):
+        import hermes_cli.web_server as ws
+        from hermes_cli.config import load_config
+
+        ws._ACTION_PROCS.pop("gateway-restart", None)
+
+        class FakeRunningProc:
+            pid = 5151
+
+            def poll(self):
+                return None
+
+        monkeypatch.setitem(ws._ACTION_PROCS, "gateway-restart", FakeRunningProc())
+
+        def fail_spawn_action(subcommand, name):
+            raise AssertionError("must not spawn a second concurrent restart")
+
+        monkeypatch.setattr(ws, "_spawn_hermes_action", fail_spawn_action)
+
+        r = self.client.post("/api/webhooks/enable")
+
+        assert r.status_code == 200
+        data = r.json()
+        assert data["needs_restart"] is False
+        assert data["restart_started"] is True
+        assert data["restart_pid"] == 5151
+        assert load_config()["platforms"]["webhook"]["enabled"] is True
 
 
 class TestOpsEndpoints:
@@ -622,6 +729,10 @@ class TestAdminEndpointsAuthGate:
         resp = self.client.get(path)
         assert resp.status_code in (401, 403)
 
+    def test_webhooks_enable_post_gated(self):
+        resp = self.client.post("/api/webhooks/enable")
+        assert resp.status_code in (401, 403)
+
 
 class TestUpdateCheckEndpoint:
     """``GET /api/hermes/update/check`` reports availability without applying.
@@ -683,6 +794,25 @@ class TestUpdateCheckEndpoint:
         assert body["message"]
         assert body["behind"] is None
 
+    def test_managed_runtime_dashboard_is_not_applyable(self, monkeypatch):
+        import hermes_cli.web_server as ws
+
+        monkeypatch.setattr(ws, "_dashboard_local_update_managed_externally", lambda: True)
+        monkeypatch.setattr(
+            ws,
+            "detect_install_method",
+            lambda *a, **k: pytest.fail(
+                "managed runtime update check should not probe install method"
+            ),
+        )
+
+        body = self.client.get("/api/hermes/update/check").json()
+        assert body["install_method"] == "managed-runtime"
+        assert body["can_apply"] is False
+        assert body["update_available"] is False
+        assert body["behind"] is None
+        assert "managed outside this dashboard" in body["message"]
+
     def test_check_failure_is_soft(self, monkeypatch):
         import hermes_cli.web_server as ws
         import hermes_cli.banner as banner
@@ -700,6 +830,37 @@ class TestUpdateCheckEndpoint:
         assert body["behind"] is None
         assert body["update_available"] is False
         assert body["message"]
+
+    def test_git_behind_includes_commits(self, monkeypatch):
+        import hermes_cli.web_server as ws
+        import hermes_cli.banner as banner
+
+        monkeypatch.setattr(ws, "detect_install_method", lambda *a, **k: "git")
+        monkeypatch.setattr(banner, "check_for_updates", lambda: 3)
+        monkeypatch.setattr(
+            ws,
+            "_recent_upstream_commits",
+            lambda n=20: [
+                {"sha": "abc1234", "summary": "feat: x", "author": "a", "at": 1},
+            ],
+        )
+
+        body = self.client.get("/api/hermes/update/check").json()
+        # The desktop overlay renders this as the "what's changed" list.
+        assert isinstance(body["commits"], list)
+        assert body["commits"][0]["sha"] == "abc1234"
+        assert body["commits"][0]["summary"] == "feat: x"
+
+    def test_up_to_date_omits_commits(self, monkeypatch):
+        import hermes_cli.web_server as ws
+        import hermes_cli.banner as banner
+
+        monkeypatch.setattr(ws, "detect_install_method", lambda *a, **k: "git")
+        monkeypatch.setattr(banner, "check_for_updates", lambda: 0)
+
+        body = self.client.get("/api/hermes/update/check").json()
+        # No commits list when there's nothing to show (additive, non-breaking).
+        assert body.get("commits", []) == []
 
 
 class TestDebugShareEndpoint:
@@ -794,3 +955,131 @@ class TestDebugShareEndpoint:
         )
         assert r.status_code == 401
 
+
+class TestToolsConfigEndpoints:
+    """Provider selection, API-key save, and post-setup spawn for toolsets —
+    the dashboard surface that replicates the `hermes tools` configurator."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, _isolate_hermes_home):
+        self.client, self.header = _client()
+
+    def test_list_toolsets_shape(self):
+        r = self.client.get("/api/tools/toolsets")
+        assert r.status_code == 200
+        rows = r.json()
+        assert isinstance(rows, list) and rows
+        row = rows[0]
+        for k in ("name", "label", "enabled", "configured", "tools"):
+            assert k in row
+
+    def test_toolset_config_provider_matrix(self):
+        # `web` has a TOOL_CATEGORIES entry → providers list populated.
+        r = self.client.get("/api/tools/toolsets/web/config")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["has_category"] is True
+        assert isinstance(body["providers"], list)
+
+    def test_unknown_toolset_config_400(self):
+        r = self.client.get("/api/tools/toolsets/not_a_toolset/config")
+        assert r.status_code == 400
+
+    def test_save_env_writes_key_and_validates_allowlist(self):
+        from hermes_cli.config import get_env_value
+
+        cfg = self.client.get("/api/tools/toolsets/web/config").json()
+        # Find a real env-var key from the visible provider matrix.
+        key = None
+        for prov in cfg["providers"]:
+            for e in prov.get("env_vars", []):
+                key = e["key"]
+                break
+            if key:
+                break
+        if not key:
+            pytest.skip("no env-var-bearing web provider in this build")
+
+        r = self.client.put(
+            "/api/tools/toolsets/web/env", json={"env": {key: "test-secret-123"}}
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert key in body["saved"]
+        assert body["is_set"][key] is True
+        # CLI-config parity: the key landed in the .env store the CLI reads.
+        assert get_env_value(key) == "test-secret-123"
+
+    def test_save_env_rejects_unknown_key(self):
+        r = self.client.put(
+            "/api/tools/toolsets/web/env",
+            json={"env": {"TOTALLY_BOGUS_KEY": "x"}},
+        )
+        assert r.status_code == 400
+
+    def test_save_env_blank_value_skipped(self):
+        cfg = self.client.get("/api/tools/toolsets/web/config").json()
+        key = None
+        for prov in cfg["providers"]:
+            for e in prov.get("env_vars", []):
+                key = e["key"]
+                break
+            if key:
+                break
+        if not key:
+            pytest.skip("no env-var-bearing web provider in this build")
+        r = self.client.put(
+            "/api/tools/toolsets/web/env", json={"env": {key: "   "}}
+        )
+        assert r.status_code == 200
+        assert key in r.json()["skipped"]
+
+    def test_post_setup_unknown_key_400(self):
+        r = self.client.post(
+            "/api/tools/toolsets/browser/post-setup", json={"key": "bogus"}
+        )
+        assert r.status_code == 400
+
+    def test_post_setup_unknown_toolset_400(self):
+        r = self.client.post(
+            "/api/tools/toolsets/not_a_toolset/post-setup",
+            json={"key": "agent_browser"},
+        )
+        assert r.status_code == 400
+
+    def test_post_setup_spawns_action(self, monkeypatch):
+        import hermes_cli.web_server as ws
+
+        spawned = {}
+
+        class _FakeProc:
+            pid = 4321
+
+        def _fake_spawn(subcommand, name):
+            spawned["subcommand"] = subcommand
+            spawned["name"] = name
+            return _FakeProc()
+
+        monkeypatch.setattr(ws, "_spawn_hermes_action", _fake_spawn)
+        r = self.client.post(
+            "/api/tools/toolsets/browser/post-setup",
+            json={"key": "agent_browser"},
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["name"] == "tools-post-setup"
+        assert body["pid"] == 4321
+        assert spawned["subcommand"] == ["tools", "post-setup", "agent_browser"]
+
+    def test_endpoints_require_session_token(self):
+        for method, path, payload in [
+            ("get", "/api/tools/toolsets/web/config", None),
+            ("put", "/api/tools/toolsets/web/env", {"env": {}}),
+            ("post", "/api/tools/toolsets/web/post-setup", {"key": "ddgs"}),
+        ]:
+            fn = getattr(self.client, method)
+            kwargs = {"headers": {self.header: "wrong-token"}}
+            if payload is not None:
+                kwargs["json"] = payload
+            r = fn(path, **kwargs)
+            assert r.status_code == 401, f"{method} {path} not gated"
