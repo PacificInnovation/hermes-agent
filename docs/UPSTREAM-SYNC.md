@@ -33,10 +33,30 @@ Kiraku-specific code (the unified Kai gateway ingest + deploy tweaks).
 - **Fork base:** upstream **v0.15.1** (`e71a2bd11`, 2026-05-28).
 - **Modernized to v0.16.0** on **2026-06-06** via `sync-upstream-20260606`
   (`git merge upstream/main`; the merge that established this doc's Path-B flow).
-- **Kiraku delta:** ~10 commits / ~16 files — `gateway/kai_ingest.py` (+ test) and
-  the Railway/Cloudflare deploy commits (cont-init, cloudflared sidecar, no-VOLUME,
-  single-service Dockerfile). The version/packaging commits were **subsumed by
-  upstream** (it adopted the same plugin.yaml bundling), so they drop out on merge.
+- **Modernized to v2026.7.1** on **2026-07-04** via `sync-upstream-20260704`
+  (`git merge v2026.7.1` — upstream switched to date-based release tags; 3,583
+  commits since the 06-06 base, only 4 conflicted files, all in our delta:
+  `cron/jobs.py` + `cron/scheduler.py` (failure-notification dedup, PR #5,
+  re-ported into upstream's new module-level `run_one_job()`),
+  `tests/gateway/test_slack.py` (both sides appended test classes — kept both),
+  and `cron.md` (kept our dedup text + upstream's [SILENT] prompt tip).
+  Upstream independently replaced the loose `[SILENT]` substring check with
+  `_is_cron_silence_response` and added Chronos external-fire
+  (`claim_dispatch`) — our dedup composes with both.)
+- **Kiraku delta:** `gateway/kai_ingest.py` (+ test) and the Railway/Cloudflare
+  deploy commits (cont-init, cloudflared sidecar, no-VOLUME, single-service
+  Dockerfile). The version/packaging commits were **subsumed by upstream**
+  (it adopted the same plugin.yaml bundling), so they drop out on merge.
+- **Delta additions since this doc was written:** slack ingest-only mode
+  (PR #4, `gateway/platforms/slack.py` + tests) and cron failure-notification
+  dedup (PR #5, `cron/jobs.py`, `cron/scheduler.py`, `tools/cronjob_tools.py`,
+  docs EN+zh). These touch SHARED upstream files — expect conflicts there on
+  every future sync (unlike kai_ingest's new-file isolation).
+- **Railway deploy gotcha (2026-07-04):** the hermes service's dashboard Watch
+  Paths are `/apps/desktop/**`, `/docker/**`, `/Dockerfile` — code-only pushes
+  to `railway-deploy` get SKIPPED ("No changes to watched files"). Until the
+  Watch Paths are widened, fire a deploy by appending a comment line to
+  `Dockerfile` in the same push.
 
 Re-measure the real gap anytime — **from a FULL clone** (see the warning below):
 
