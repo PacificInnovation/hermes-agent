@@ -6,6 +6,7 @@ Output is saved to ~/.hermes/cron/output/{job_id}/{timestamp}.md
 """
 
 import copy
+import hashlib
 import json
 import logging
 import shutil
@@ -907,16 +908,33 @@ def remove_job(job_id: str) -> bool:
     return False
 
 
+def failure_signature(error: Optional[str]) -> str:
+    """Stable short fingerprint of a failure message.
+
+    Used to detect a job failing repeatedly with the *same* error so the
+    scheduler can suppress duplicate failure notifications. Only the first
+    300 characters count — tracebacks past that point vary (line numbers,
+    timestamps) without changing what the operator needs to know.
+    """
+    text = (error or "").strip()[:300]
+    return hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:16]
+
+
 def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
-                 delivery_error: Optional[str] = None):
+                 delivery_error: Optional[str] = None,
+                 failure_notified: bool = False):
     """
     Mark a job as having been run.
-    
+
     Updates last_run_at, last_status, increments completed count,
     computes next_run_at, and auto-deletes if repeat limit reached.
 
     ``delivery_error`` is tracked separately from the agent error — a job
     can succeed (agent produced output) but fail delivery (platform down).
+
+    ``failure_notified`` records that a failure notification was actually
+    delivered for this run; repeat-failure suppression keys off the stored
+    ``last_failure_notified_at`` timestamp.
     """
     with _jobs_file_lock:
         jobs = load_jobs()
@@ -928,6 +946,16 @@ def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
                 job["last_error"] = error if not success else None
                 # Track delivery failures separately — cleared on successful delivery
                 job["last_delivery_error"] = delivery_error
+                # Failure-streak bookkeeping for repeat-notification dedup.
+                if success:
+                    job["failure_streak"] = 0
+                    job["last_failure_sig"] = None
+                    job["last_failure_notified_at"] = None
+                else:
+                    job["failure_streak"] = int(job.get("failure_streak") or 0) + 1
+                    job["last_failure_sig"] = failure_signature(error)
+                    if failure_notified:
+                        job["last_failure_notified_at"] = now
                 
                 # Increment completed count
                 if job.get("repeat"):
