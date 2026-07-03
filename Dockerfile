@@ -343,3 +343,4 @@ RUN set -eu; \
 
 ENTRYPOINT [ "/init", "/opt/hermes/docker/main-wrapper.sh" ]
 CMD [ ]
+# deploy-stamp: 2026-07-04 PR#5 cron failure-notification dedup (watchPatterns exclude code dirs — Dockerfile touch required to fire build)
