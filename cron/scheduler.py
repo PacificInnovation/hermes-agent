@@ -20,6 +20,7 @@ import subprocess
 import sys
 import threading
 from contextlib import contextmanager
+from datetime import datetime
 
 # fcntl is Unix-only; on Windows use msvcrt for file locking
 try:
@@ -149,12 +150,64 @@ _LEGACY_HOME_TARGET_ENV_VARS = {
     "QQBOT_HOME_CHANNEL": "QQ_HOME_CHANNEL",
 }
 
-from cron.jobs import get_due_jobs, mark_job_run, save_job_output, advance_next_run
+from cron.jobs import (
+    get_due_jobs,
+    mark_job_run,
+    save_job_output,
+    advance_next_run,
+    failure_signature,
+)
 
 # Sentinel: when a cron agent has nothing new to report, it can start its
 # response with this marker to suppress delivery.  Output is still saved
 # locally for audit.
 SILENT_MARKER = "[SILENT]"
+
+# Repeat-failure notification dedup: a job that keeps failing with the same
+# error notifies on the first failure, then stays quiet until this many hours
+# pass. A *different* error always notifies immediately, and the run itself
+# still executes and is recorded — only the duplicate chat notification is
+# suppressed. Override with HERMES_CRON_FAILURE_RENOTIFY_HOURS (0 disables
+# suppression entirely).
+DEFAULT_FAILURE_RENOTIFY_HOURS = 24.0
+
+
+def _failure_renotify_seconds() -> float:
+    raw = os.getenv("HERMES_CRON_FAILURE_RENOTIFY_HOURS", "").strip()
+    try:
+        hours = float(raw) if raw else DEFAULT_FAILURE_RENOTIFY_HOURS
+    except (TypeError, ValueError):
+        logger.warning(
+            "Invalid HERMES_CRON_FAILURE_RENOTIFY_HOURS value %r; using default %s",
+            raw, DEFAULT_FAILURE_RENOTIFY_HOURS,
+        )
+        hours = DEFAULT_FAILURE_RENOTIFY_HOURS
+    return max(0.0, hours * 3600.0)
+
+
+def _should_notify_failure(job: dict, error: Optional[str]) -> bool:
+    """True when this run's failure notification should be delivered.
+
+    First failure of a kind always notifies. Identical repeat failures are
+    suppressed until the re-notify interval elapses, so an unattended broken
+    job (e.g. expired provider login) posts a reminder at most once per
+    interval instead of on every tick.
+    """
+    if failure_signature(error) != job.get("last_failure_sig"):
+        return True
+    notified_raw = job.get("last_failure_notified_at")
+    if not notified_raw:
+        return True
+    try:
+        notified_at = datetime.fromisoformat(str(notified_raw))
+    except (TypeError, ValueError):
+        return True
+    now = _hermes_now()
+    if notified_at.tzinfo is None:
+        # mark_job_run always writes tz-aware timestamps; this guards
+        # hand-edited or externally-written jobs.json values.
+        notified_at = notified_at.replace(tzinfo=now.tzinfo)
+    return (now - notified_at).total_seconds() >= _failure_renotify_seconds()
 
 # ---------------------------------------------------------------------------
 # Persistent thread pool for parallel cron jobs.
@@ -2087,17 +2140,55 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
                 if verbose:
                     logger.info("Output saved to: %s", output_file)
 
-                # Deliver the final response to the origin/target chat.
-                # If the agent responded with [SILENT], skip delivery (but
-                # output is already saved above).  Failed jobs always deliver.
-                deliver_content = final_response if success else f"⚠️ Cron job '{job.get('name', job['id'])}' failed:\n{error}"
-                # Treat whitespace-only final responses the same as empty
-                # responses: do not deliver a blank message, and let the
-                # empty-response guard below mark the run as a soft failure.
-                should_deliver = bool(deliver_content.strip())
-                if should_deliver and success and SILENT_MARKER in deliver_content.strip().upper():
-                    logger.info("Job '%s': agent returned %s — skipping delivery", job["id"], SILENT_MARKER)
-                    should_deliver = False
+                # Treat empty final_response as a soft failure so last_status
+                # is not "ok" — the agent ran but produced nothing useful.
+                # Converted BEFORE the delivery decision so the failure/recovery
+                # notices below see the true outcome. Soft failures stay
+                # undelivered (a blank message helps nobody). (issue #8585)
+                soft_failure = False
+                if success and not final_response.strip():
+                    success = False
+                    soft_failure = True
+                    error = "Agent completed but produced empty response (model error, timeout, or misconfiguration)"
+
+                prev_streak = int(job.get("failure_streak") or 0)
+                failure_notified = False
+
+                if success:
+                    # Deliver the final response to the origin/target chat.
+                    # If the agent responded with [SILENT], skip delivery (but
+                    # output is already saved above).
+                    deliver_content = final_response
+                    should_deliver = bool(deliver_content.strip())
+                    if should_deliver and SILENT_MARKER in deliver_content.strip().upper():
+                        logger.info("Job '%s': agent returned %s — skipping delivery", job["id"], SILENT_MARKER)
+                        should_deliver = False
+                        deliver_content = ""
+                    if prev_streak > 0 and job.get("last_failure_notified_at"):
+                        # Close the loop after a failure streak, even when the
+                        # agent itself had nothing to deliver — otherwise the
+                        # operator's last signal was a failure notice. Gated on
+                        # a notice having actually been delivered: a streak of
+                        # soft failures the operator never heard about must not
+                        # produce a "recovered" banner out of nowhere.
+                        recovery = (
+                            f"✅ Cron job '{job.get('name', job['id'])}' recovered "
+                            f"after {prev_streak} failed run(s)."
+                        )
+                        deliver_content = f"{recovery}\n\n{deliver_content}" if should_deliver else recovery
+                        should_deliver = True
+                else:
+                    deliver_content = f"⚠️ Cron job '{job.get('name', job['id'])}' failed:\n{error}"
+                    if prev_streak > 0:
+                        deliver_content += f"\n(failure #{prev_streak + 1} in a row)"
+                    should_deliver = (not soft_failure) and _should_notify_failure(job, error)
+                    if should_deliver:
+                        failure_notified = True
+                    elif not soft_failure:
+                        logger.info(
+                            "Job '%s': suppressing repeat failure notification (streak=%d)",
+                            job["id"], prev_streak + 1,
+                        )
 
                 delivery_error = None
                 if should_deliver:
@@ -2107,14 +2198,13 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
                         delivery_error = str(de)
                         logger.error("Delivery failed for job %s: %s", job["id"], de)
 
-                # Treat empty final_response as a soft failure so last_status
-                # is not "ok" — the agent ran but produced nothing useful.
-                # (issue #8585)
-                if success and not final_response.strip():
-                    success = False
-                    error = "Agent completed but produced empty response (model error, timeout, or misconfiguration)"
+                # A failure notice that never reached the chat must not start
+                # the suppression window — retry the notification next run.
+                if failure_notified and delivery_error:
+                    failure_notified = False
 
-                mark_job_run(job["id"], success, error, delivery_error=delivery_error)
+                mark_job_run(job["id"], success, error, delivery_error=delivery_error,
+                             failure_notified=failure_notified)
                 return True
 
             except Exception as e:

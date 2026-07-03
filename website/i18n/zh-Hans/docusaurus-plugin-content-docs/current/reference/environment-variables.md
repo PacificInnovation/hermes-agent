@@ -523,6 +523,7 @@ Graph 事件（Teams 会议、日历、聊天等）的入站变更通知监听�
 | `HERMES_CRON_TIMEOUT` | cron 任务 agent 运行的不活动超时（秒，默认：`600`）。agent 在主动调用工具或接收流 token 时可无限运行——仅在空闲时触发。设为 `0` 表示无限制。 |
 | `HERMES_CRON_SCRIPT_TIMEOUT` | cron 任务附加的预运行脚本超时（秒，默认：`120`）。对需要更长执行时间的脚本（例如随机延迟的反机器人计时）可增大此值。也可通过 `config.yaml` 中的 `cron.script_timeout_seconds` 配置。 |
 | `HERMES_CRON_MAX_PARALLEL` | 每次 tick 并行运行的最大 cron 任务数（默认：`4`）。 |
+| `HERMES_CRON_FAILURE_RENOTIFY_HOURS` | 重复失败通知的抑制窗口（小时，默认：`24`）。持续以相同错误失败的 cron 任务只通知一次，之后保持静默直到此间隔到期；不同的错误总是立即通知。设为 `0` 可禁用抑制，每次失败都通知。 |
 
 ## Agent 行为
 

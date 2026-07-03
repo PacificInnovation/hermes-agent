@@ -782,7 +782,16 @@ def format_auth_error(error: Exception) -> str:
         return str(error)
 
     if error.relogin_required:
-        return f"{error} Run `hermes model` to re-authenticate."
+        # This copy is delivered to chat surfaces (Slack/Telegram) by cron
+        # failure notices, where CLI-only advice reads as something the chat
+        # user should type back. Be explicit that a human at the host must act.
+        provider = (error.provider or "").strip() or "<provider>"
+        return (
+            f"{error} An operator must re-authenticate in a terminal on the "
+            f"Hermes host (for container deployments, the service console): "
+            f"run `hermes auth add {provider} --type oauth` or `hermes model` "
+            f"and complete the login link. This cannot be done from chat."
+        )
 
     if error.code == "subscription_required":
         if error.provider == "nous":

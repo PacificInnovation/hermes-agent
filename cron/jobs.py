@@ -6,6 +6,7 @@ Output is saved to ~/.hermes/cron/output/{job_id}/{timestamp}.md
 """
 
 import copy
+import hashlib
 import json
 import logging
 import shutil
@@ -697,6 +698,10 @@ def create_job(
         "last_status": None,
         "last_error": None,
         "last_delivery_error": None,
+        # Repeat-failure notification dedup state (maintained by mark_job_run)
+        "failure_streak": 0,
+        "last_failure_sig": None,
+        "last_failure_notified_at": None,
         # Delivery configuration
         "deliver": deliver,
         "origin": origin,  # Tracks where job was created for "origin" delivery
@@ -777,6 +782,16 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
         raise ValueError(
             f"Cron job field(s) cannot be updated: {', '.join(sorted(bad_fields))}"
         )
+
+    # Editing what the job executes invalidates the repeat-failure dedup
+    # state: an operator who just fixed a broken job is actively watching
+    # for the next result and must get a notification even if the job
+    # fails with the same error signature as before.
+    _exec_fields = {"prompt", "model", "provider", "base_url", "script", "skill", "skills"}
+    if updates and _exec_fields.intersection(updates):
+        updates.setdefault("failure_streak", 0)
+        updates.setdefault("last_failure_sig", None)
+        updates.setdefault("last_failure_notified_at", None)
 
     jobs = load_jobs()
     for i, job in enumerate(jobs):
@@ -864,6 +879,10 @@ def resume_job(job_id: str) -> Optional[Dict[str, Any]]:
             "paused_at": None,
             "paused_reason": None,
             "next_run_at": next_run_at,
+            # Operator-initiated resume: always notify on the next failure.
+            "failure_streak": 0,
+            "last_failure_sig": None,
+            "last_failure_notified_at": None,
         },
     )
 
@@ -881,6 +900,10 @@ def trigger_job(job_id: str) -> Optional[Dict[str, Any]]:
             "paused_at": None,
             "paused_reason": None,
             "next_run_at": _hermes_now().isoformat(),
+            # Operator-initiated trigger: always notify on the next failure.
+            "failure_streak": 0,
+            "last_failure_sig": None,
+            "last_failure_notified_at": None,
         },
     )
 
@@ -907,16 +930,33 @@ def remove_job(job_id: str) -> bool:
     return False
 
 
+def failure_signature(error: Optional[str]) -> str:
+    """Stable short fingerprint of a failure message.
+
+    Used to detect a job failing repeatedly with the *same* error so the
+    scheduler can suppress duplicate failure notifications. Only the first
+    300 characters count — tracebacks past that point vary (line numbers,
+    timestamps) without changing what the operator needs to know.
+    """
+    text = (error or "").strip()[:300]
+    return hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:16]
+
+
 def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
-                 delivery_error: Optional[str] = None):
+                 delivery_error: Optional[str] = None,
+                 failure_notified: bool = False):
     """
     Mark a job as having been run.
-    
+
     Updates last_run_at, last_status, increments completed count,
     computes next_run_at, and auto-deletes if repeat limit reached.
 
     ``delivery_error`` is tracked separately from the agent error — a job
     can succeed (agent produced output) but fail delivery (platform down).
+
+    ``failure_notified`` records that a failure notification was actually
+    delivered for this run; repeat-failure suppression keys off the stored
+    ``last_failure_notified_at`` timestamp.
     """
     with _jobs_file_lock:
         jobs = load_jobs()
@@ -928,6 +968,16 @@ def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
                 job["last_error"] = error if not success else None
                 # Track delivery failures separately — cleared on successful delivery
                 job["last_delivery_error"] = delivery_error
+                # Failure-streak bookkeeping for repeat-notification dedup.
+                if success:
+                    job["failure_streak"] = 0
+                    job["last_failure_sig"] = None
+                    job["last_failure_notified_at"] = None
+                else:
+                    job["failure_streak"] = int(job.get("failure_streak") or 0) + 1
+                    job["last_failure_sig"] = failure_signature(error)
+                    if failure_notified:
+                        job["last_failure_notified_at"] = now
                 
                 # Increment completed count
                 if job.get("repeat"):

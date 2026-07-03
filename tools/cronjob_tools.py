@@ -438,6 +438,8 @@ def _format_job(job: Dict[str, Any]) -> Dict[str, Any]:
         "last_run_at": job.get("last_run_at"),
         "last_status": job.get("last_status"),
         "last_delivery_error": job.get("last_delivery_error"),
+        "failure_streak": int(job.get("failure_streak") or 0),
+        "last_failure_notified_at": job.get("last_failure_notified_at"),
         "enabled": job.get("enabled", True),
         "state": job.get("state", "scheduled" if job.get("enabled", True) else "paused"),
         "paused_at": job.get("paused_at"),
