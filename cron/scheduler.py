@@ -2163,10 +2163,13 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
                         logger.info("Job '%s': agent returned %s — skipping delivery", job["id"], SILENT_MARKER)
                         should_deliver = False
                         deliver_content = ""
-                    if prev_streak > 0:
+                    if prev_streak > 0 and job.get("last_failure_notified_at"):
                         # Close the loop after a failure streak, even when the
                         # agent itself had nothing to deliver — otherwise the
-                        # operator's last signal was a failure notice.
+                        # operator's last signal was a failure notice. Gated on
+                        # a notice having actually been delivered: a streak of
+                        # soft failures the operator never heard about must not
+                        # produce a "recovered" banner out of nowhere.
                         recovery = (
                             f"✅ Cron job '{job.get('name', job['id'])}' recovered "
                             f"after {prev_streak} failed run(s)."

@@ -197,9 +197,26 @@ class TestSuppressionLifecycle:
         saved = get_job(job["id"])
         assert saved["failure_streak"] == 4
 
-        # Operator re-authenticates; next run succeeds.
-        assert int(saved.get("failure_streak") or 0) > 0  # recovery notice condition
+        # Operator re-authenticates; next run succeeds. Recovery notice fires
+        # only when a failure notice was actually delivered during the streak.
+        assert int(saved.get("failure_streak") or 0) > 0
+        assert saved.get("last_failure_notified_at")  # notice was seen → recovery fires
         mark_job_run(job["id"], True)
         saved = get_job(job["id"])
         assert saved["failure_streak"] == 0
         assert saved.get("last_failure_sig") is None
+
+    def test_soft_failure_streak_never_notified_blocks_recovery_banner(self):
+        """A streak of soft failures (empty responses) is never delivered, so
+        the recovery banner condition (last_failure_notified_at set) must stay
+        false — no 'recovered' message about failures nobody heard of."""
+        job = _make_job()
+        for _ in range(3):
+            mark_job_run(
+                job["id"], False,
+                "Agent completed but produced empty response (model error, timeout, or misconfiguration)",
+                failure_notified=False,
+            )
+        saved = get_job(job["id"])
+        assert saved["failure_streak"] == 3
+        assert saved.get("last_failure_notified_at") is None  # gate closed
