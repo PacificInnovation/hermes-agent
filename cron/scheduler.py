@@ -185,7 +185,7 @@ def _failure_renotify_seconds() -> float:
     return max(0.0, hours * 3600.0)
 
 
-def _should_notify_failure(job: dict, error: "Optional[str]") -> bool:
+def _should_notify_failure(job: dict, error: Optional[str]) -> bool:
     """True when this run's failure notification should be delivered.
 
     First failure of a kind always notifies. Identical repeat failures are
@@ -204,7 +204,8 @@ def _should_notify_failure(job: dict, error: "Optional[str]") -> bool:
         return True
     now = _hermes_now()
     if notified_at.tzinfo is None:
-        # Legacy naive timestamp — compare in the scheduler's local frame.
+        # mark_job_run always writes tz-aware timestamps; this guards
+        # hand-edited or externally-written jobs.json values.
         notified_at = notified_at.replace(tzinfo=now.tzinfo)
     return (now - notified_at).total_seconds() >= _failure_renotify_seconds()
 

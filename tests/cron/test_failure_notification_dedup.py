@@ -15,6 +15,9 @@ from cron.jobs import (
     failure_signature,
     get_job,
     mark_job_run,
+    resume_job,
+    trigger_job,
+    update_job,
 )
 from cron.scheduler import _should_notify_failure, DEFAULT_FAILURE_RENOTIFY_HOURS
 from hermes_time import now as _hermes_now
@@ -169,6 +172,53 @@ class TestMarkJobRunStreak:
         saved = get_job(job["id"])
         assert saved["failure_streak"] == 2
         assert saved["last_failure_sig"] == failure_signature("Invalid refresh token")
+
+
+# =========================================================================
+# Dedup state reset on operator actions
+# =========================================================================
+
+class TestDedupStateReset:
+    def _fail_once_notified(self):
+        job = create_job(schedule="every 1h", prompt="check broker deals")
+        mark_job_run(job["id"], False, AUTH_ERROR, failure_notified=True)
+        return get_job(job["id"])
+
+    def test_update_of_exec_field_resets_dedup_state(self):
+        job = self._fail_once_notified()
+        update_job(job["id"], {"prompt": "check broker deals v2"})
+        saved = get_job(job["id"])
+        assert saved["failure_streak"] == 0
+        assert saved.get("last_failure_sig") is None
+        assert saved.get("last_failure_notified_at") is None
+
+    def test_update_of_cosmetic_field_keeps_dedup_state(self):
+        job = self._fail_once_notified()
+        update_job(job["id"], {"name": "renamed job"})
+        saved = get_job(job["id"])
+        assert saved["failure_streak"] == 1
+        assert saved.get("last_failure_notified_at")
+
+    def test_trigger_job_resets_dedup_state(self):
+        job = self._fail_once_notified()
+        trigger_job(job["id"])
+        saved = get_job(job["id"])
+        assert saved["failure_streak"] == 0
+        assert saved.get("last_failure_notified_at") is None
+
+    def test_resume_job_resets_dedup_state(self):
+        job = self._fail_once_notified()
+        resume_job(job["id"])
+        saved = get_job(job["id"])
+        assert saved["failure_streak"] == 0
+        assert saved.get("last_failure_notified_at") is None
+
+    def test_created_job_initializes_dedup_fields(self):
+        job = create_job(schedule="every 1h", prompt="check broker deals")
+        saved = get_job(job["id"])
+        assert saved["failure_streak"] == 0
+        assert saved.get("last_failure_sig") is None
+        assert saved.get("last_failure_notified_at") is None
 
 
 # =========================================================================

@@ -698,6 +698,10 @@ def create_job(
         "last_status": None,
         "last_error": None,
         "last_delivery_error": None,
+        # Repeat-failure notification dedup state (maintained by mark_job_run)
+        "failure_streak": 0,
+        "last_failure_sig": None,
+        "last_failure_notified_at": None,
         # Delivery configuration
         "deliver": deliver,
         "origin": origin,  # Tracks where job was created for "origin" delivery
@@ -778,6 +782,16 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
         raise ValueError(
             f"Cron job field(s) cannot be updated: {', '.join(sorted(bad_fields))}"
         )
+
+    # Editing what the job executes invalidates the repeat-failure dedup
+    # state: an operator who just fixed a broken job is actively watching
+    # for the next result and must get a notification even if the job
+    # fails with the same error signature as before.
+    _exec_fields = {"prompt", "model", "provider", "base_url", "script", "skill", "skills"}
+    if updates and _exec_fields.intersection(updates):
+        updates.setdefault("failure_streak", 0)
+        updates.setdefault("last_failure_sig", None)
+        updates.setdefault("last_failure_notified_at", None)
 
     jobs = load_jobs()
     for i, job in enumerate(jobs):
@@ -865,6 +879,10 @@ def resume_job(job_id: str) -> Optional[Dict[str, Any]]:
             "paused_at": None,
             "paused_reason": None,
             "next_run_at": next_run_at,
+            # Operator-initiated resume: always notify on the next failure.
+            "failure_streak": 0,
+            "last_failure_sig": None,
+            "last_failure_notified_at": None,
         },
     )
 
@@ -882,6 +900,10 @@ def trigger_job(job_id: str) -> Optional[Dict[str, Any]]:
             "paused_at": None,
             "paused_reason": None,
             "next_run_at": _hermes_now().isoformat(),
+            # Operator-initiated trigger: always notify on the next failure.
+            "failure_streak": 0,
+            "last_failure_sig": None,
+            "last_failure_notified_at": None,
         },
     )
 

@@ -330,7 +330,7 @@ Check if nginx is running. If everything is healthy, respond with only [SILENT].
 Otherwise, report the issue.
 ```
 
-失败的任务无论 `[SILENT]` 标记如何都会投递——只有成功的运行才能被静默。
+失败的任务无论 `[SILENT]` 标记如何都会投递失败通知，并带有重复失败去重机制：同类错误首次失败会立即通知，但持续以*相同*错误失败的任务会保持静默，直到重新通知间隔到期（默认 24 小时，可通过 `HERMES_CRON_FAILURE_RENOTIFY_HOURS` 配置；设为 `0` 可禁用抑制）。*不同*的错误总是立即通知。当任务在已通知的失败连串后再次成功时，会发送恢复通知。以空响应完成的运行会被记录为失败，但不会投递。
 
 ## 脚本超时
 

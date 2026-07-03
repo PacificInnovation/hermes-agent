@@ -544,6 +544,7 @@ Advanced per-platform knobs for throttling the outbound message batcher. Most us
 | `HERMES_CRON_TIMEOUT` | Inactivity timeout for cron job agent runs in seconds (default: `600`). The agent can run indefinitely while actively calling tools or receiving stream tokens — this only triggers when idle. Set to `0` for unlimited. |
 | `HERMES_CRON_SCRIPT_TIMEOUT` | Timeout for pre-run scripts attached to cron jobs in seconds (default: `120`). Override for scripts that need longer execution (e.g., randomized delays for anti-bot timing). Also configurable via `cron.script_timeout_seconds` in `config.yaml`. |
 | `HERMES_CRON_MAX_PARALLEL` | Max cron jobs run in parallel per tick (default: `4`). |
+| `HERMES_CRON_FAILURE_RENOTIFY_HOURS` | Repeat-failure notification suppression window in hours (default: `24`). A cron job failing repeatedly with the same error notifies once, then stays quiet until this interval elapses; a different error always notifies immediately. Set to `0` to disable suppression and notify on every failure. |
 
 ## Agent Behavior
 

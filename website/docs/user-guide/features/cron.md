@@ -338,7 +338,7 @@ Check if nginx is running. If everything is healthy, respond with only [SILENT].
 Otherwise, report the issue.
 ```
 
-Failed jobs always deliver regardless of the `[SILENT]` marker — only successful runs can be silenced.
+Failed jobs deliver a failure notice regardless of the `[SILENT]` marker, with repeat-failure dedup: the first failure of a kind notifies immediately, but a job that keeps failing with the *same* error stays quiet until the re-notify interval elapses (default 24 hours, configurable via `HERMES_CRON_FAILURE_RENOTIFY_HOURS`; `0` disables suppression). A *different* error always notifies immediately. When the job succeeds again after a notified failure streak, a recovery notice is posted. Runs that complete with an empty response are recorded as failures but never delivered.
 
 ## Script timeout
 
