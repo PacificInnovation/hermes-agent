@@ -1773,7 +1773,17 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
                     if entry.get("api_key"):
                         fb_kwargs["explicit_api_key"] = entry["api_key"]
                     runtime = resolve_runtime_provider(**fb_kwargs)
-                    logger.info("Job '%s': fallback resolved to %s", job_id, runtime.get("provider"))
+                    # Switch the model to the fallback entry's model too. Without
+                    # this, a provider fallback (e.g. nous -> anthropic) kept the
+                    # PRIMARY's model string (e.g. "deepseek/deepseek-v4-flash")
+                    # and sent it to the fallback provider's API, which 400/404s
+                    # (observed: model=deepseek/... sent to api.anthropic.com).
+                    # api_mode is provider-derived by resolve_runtime_provider, so
+                    # switching the model alone is sufficient and correct.
+                    fb_model = str(entry.get("model") or "").strip()
+                    if fb_model:
+                        model = fb_model
+                    logger.info("Job '%s': fallback resolved to %s (model=%s)", job_id, runtime.get("provider"), model)
                     break
                 except Exception as fb_exc:
                     logger.debug("Job '%s': fallback %s failed: %s", job_id, entry.get("provider"), fb_exc)
