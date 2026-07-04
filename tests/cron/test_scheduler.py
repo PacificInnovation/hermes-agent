@@ -912,6 +912,61 @@ class TestRunJobSessionPersistence:
         fake_db.close.assert_called_once()
         mock_agent.close.assert_called_once()
 
+    def test_run_job_fallback_switches_model_not_just_provider(self, tmp_path):
+        """Regression: when the primary provider's auth fails, the fallback must
+        switch BOTH the provider AND the model. Previously the loop swapped
+        provider/base_url/api_key but kept the primary's model string, so e.g.
+        model="deepseek/deepseek-v4-flash" got sent to api.anthropic.com ->
+        HTTP 401/404. The fallback entry's model must win."""
+        from hermes_cli.auth import AuthError
+
+        (tmp_path / "config.yaml").write_text(
+            "model:\n"
+            "  provider: nous\n"
+            "  default: deepseek/deepseek-v4-flash\n"
+            "fallback_providers:\n"
+            "  - provider: anthropic\n"
+            "    model: anthropic/claude-opus-4.8\n",
+            encoding="utf-8",
+        )
+        job = {"id": "fb-job", "name": "fb", "prompt": "hi"}  # unpinned model
+        fake_db = MagicMock()
+
+        with patch("cron.scheduler._hermes_home", tmp_path), \
+             patch("cron.scheduler._get_hermes_home", return_value=tmp_path), \
+             patch("cron.scheduler._resolve_origin", return_value=None), \
+             patch("dotenv.load_dotenv"), \
+             patch("hermes_state.SessionDB", return_value=fake_db), \
+             patch(
+                 "hermes_cli.runtime_provider.resolve_runtime_provider",
+                 side_effect=[
+                     AuthError("Hermes is not logged into Nous Portal.",
+                               provider="nous", relogin_required=True),
+                     {
+                         "api_key": "anthropic-key",
+                         "base_url": "https://api.anthropic.com",
+                         "provider": "anthropic",
+                         "api_mode": "anthropic_messages",
+                     },
+                 ],
+             ), \
+             patch("run_agent.AIAgent") as mock_agent_cls:
+            mock_agent = MagicMock()
+            mock_agent.run_conversation.return_value = {"final_response": "ok"}
+            mock_agent_cls.return_value = mock_agent
+
+            success, _output, final_response, error = run_job(job)
+
+        assert success is True, f"fallback run should succeed, got error={error}"
+        kwargs = mock_agent_cls.call_args.kwargs
+        assert kwargs["provider"] == "anthropic"
+        assert kwargs["base_url"] == "https://api.anthropic.com"
+        # THE FIX: model switched to the fallback entry's model, not the
+        # primary's deepseek slug.
+        assert kwargs["model"] == "anthropic/claude-opus-4.8", (
+            f"fallback kept primary model: {kwargs['model']!r}"
+        )
+
     def test_run_job_closes_agent_on_failure_to_prevent_fd_leak(self, tmp_path):
         # Regression: if ``run_conversation`` raises, the ephemeral cron
         # agent was previously leaked — over days of ticks this accumulated
