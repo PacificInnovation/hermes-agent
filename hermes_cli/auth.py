@@ -1088,8 +1088,56 @@ def _load_auth_store(auth_file: Optional[Path] = None) -> Dict[str, Any]:
     return {"version": AUTH_STORE_VERSION, "providers": {}}
 
 
-def _save_auth_store(auth_store: Dict[str, Any]) -> Path:
+class AuthStoreWipeGuard(RuntimeError):
+    """Raised when a save would overwrite a populated auth store with an empty
+    one. Guards against the catastrophic-wipe class: a transient unreadable /
+    corrupt auth.json read makes ``_load_auth_store`` hand back an empty store
+    ({"providers": {}}), and the next read-modify-write (esp. the frequently
+    called ``write_credential_pool``) would then persist that empty store,
+    silently deleting every provider + pooled credential with no
+    ``last_auth_error``. Intentional clears (logout / provider removal) pass
+    ``allow_provider_shrink=True``.
+    """
+
+
+def _save_auth_store(auth_store: Dict[str, Any], *, allow_provider_shrink: bool = False) -> Path:
     auth_file = _auth_file_path()
+
+    # Wipe guard: refuse to overwrite an existing, populated store with one that
+    # has NO providers AND NO credential_pool, unless an intentional clear opts
+    # in. This is the last line of defense against the empty-store amplification
+    # bug (unreadable/corrupt read -> empty in-memory store -> persisted wipe).
+    if not allow_provider_shrink:
+        new_providers = (auth_store or {}).get("providers") or {}
+        new_pool = (auth_store or {}).get("credential_pool") or {}
+        if not new_providers and not new_pool:
+            # About to persist a store with NO providers AND NO credential_pool.
+            # Only safe when there is genuinely nothing to lose. Single read (no
+            # exists()+read TOCTOU): a missing file means first-run (allow);
+            # anything else — unreadable, corrupt, non-dict, or populated — is
+            # treated as fail-safe and refused.
+            block = False
+            try:
+                existing = json.loads(auth_file.read_text())
+            except FileNotFoundError:
+                existing = None  # genuinely absent -> first write, allow
+            except Exception:
+                block = True     # unreadable/corrupt (the incident) -> refuse
+            else:
+                if not isinstance(existing, dict):
+                    block = True  # unknown shape -> fail safe
+                elif existing.get("providers") or existing.get("credential_pool"):
+                    block = True  # populated -> refuse the wipe
+            if block:
+                raise AuthStoreWipeGuard(
+                    f"refusing to overwrite auth store {auth_file} with an empty "
+                    "store (no providers, no credential_pool). This is almost "
+                    "always an unreadable/corrupt auth.json read upstream (e.g. "
+                    "root-owned file -> Errno 13 for the gateway user), not an "
+                    "intentional logout. Fix file perms/ownership; pass "
+                    "allow_provider_shrink=True only for a deliberate clear."
+                )
+
     auth_file.parent.mkdir(parents=True, exist_ok=True)
     # Tighten parent dir to 0o700 so siblings can't traverse to creds.
     # No-op on Windows (POSIX mode bits not enforced); ignore failures.
@@ -1424,7 +1472,10 @@ def clear_provider_auth(provider_id: Optional[str] = None) -> bool:
 
         if not cleared:
             return False
-        _save_auth_store(auth_store)
+        # Intentional clear (hermes logout / disconnect): may legitimately
+        # remove the last provider, leaving an empty store — bypass the wipe
+        # guard for this deliberate path.
+        _save_auth_store(auth_store, allow_provider_shrink=True)
     return True
 
 
