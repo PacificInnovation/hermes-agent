@@ -232,7 +232,9 @@ def _clear_auth_store_provider(provider: str) -> bool:
         providers_dict = auth_store.get("providers")
         if isinstance(providers_dict, dict) and provider in providers_dict:
             del providers_dict[provider]
-            _save_auth_store(auth_store)
+            # Intentional provider removal (`hermes auth remove`): may empty the
+            # store legitimately — bypass the wipe guard for this deliberate path.
+            _save_auth_store(auth_store, allow_provider_shrink=True)
             return True
     return False
 
