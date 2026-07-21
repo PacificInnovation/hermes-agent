@@ -9,12 +9,16 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger
 } from '@/components/ui/dropdown-menu'
-import { Eye, EyeOff, ExternalLink, Trash2 } from '@/lib/icons'
+import { Tip } from '@/components/ui/tooltip'
+import { useI18n } from '@/i18n'
 import { triggerHaptic } from '@/lib/haptics'
+import { ExternalLink, Eye, EyeOff, KeyRound, Trash2 } from '@/lib/icons'
 import { cn } from '@/lib/utils'
 
-interface EnvVarActionsMenuProps
-  extends Pick<React.ComponentProps<typeof DropdownMenuContent>, 'align' | 'sideOffset'> {
+interface EnvVarActionsMenuProps extends Pick<
+  React.ComponentProps<typeof DropdownMenuContent>,
+  'align' | 'sideOffset'
+> {
   children: React.ReactNode
   clearDisabled?: boolean
   docsUrl?: string | null
@@ -23,6 +27,10 @@ interface EnvVarActionsMenuProps
   label: string
   onClear?: () => void
   onEdit: () => void
+  /** Internal navigation to Settings → API Keys with this key highlighted.
+   *  Rendered only when provided AND the key is set (an unset key is managed
+   *  right here via Set). */
+  onManageKeys?: () => void
   onReveal?: () => void
   showReveal?: boolean
 }
@@ -37,23 +45,22 @@ export function EnvVarActionsMenu({
   label,
   onClear,
   onEdit,
+  onManageKeys,
   onReveal,
   showReveal = true,
   sideOffset = 6
 }: EnvVarActionsMenuProps) {
+  const { t } = useI18n()
+  const copy = t.settings.envActions
   const hasClear = isSet && onClear
   const hasReveal = isSet && showReveal && onReveal
+  const hasManageKeys = isSet && onManageKeys
   const hasDocs = Boolean(docsUrl?.trim())
 
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>{children}</DropdownMenuTrigger>
-      <DropdownMenuContent
-        align={align}
-        aria-label={`Actions for ${label}`}
-        className="w-44"
-        sideOffset={sideOffset}
-      >
+      <DropdownMenuContent align={align} aria-label={copy.actionsFor(label)} className="w-44" sideOffset={sideOffset}>
         {hasDocs && (
           <DropdownMenuItem
             onSelect={event => {
@@ -63,7 +70,7 @@ export function EnvVarActionsMenu({
             }}
           >
             <ExternalLink className="size-3.5" />
-            <span>Docs</span>
+            <span>{copy.docs}</span>
           </DropdownMenuItem>
         )}
 
@@ -75,7 +82,7 @@ export function EnvVarActionsMenu({
             }}
           >
             {isRevealed ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
-            <span>{isRevealed ? 'Hide value' : 'Reveal value'}</span>
+            <span>{isRevealed ? copy.hideValue : copy.revealValue}</span>
           </DropdownMenuItem>
         )}
 
@@ -86,8 +93,20 @@ export function EnvVarActionsMenu({
           }}
         >
           <Codicon name="edit" size="0.875rem" />
-          <span>{isSet ? 'Replace' : 'Set'}</span>
+          <span>{isSet ? copy.replace : copy.set}</span>
         </DropdownMenuItem>
+
+        {hasManageKeys && (
+          <DropdownMenuItem
+            onSelect={() => {
+              triggerHaptic('selection')
+              onManageKeys()
+            }}
+          >
+            <KeyRound className="size-3.5" />
+            <span>{copy.manageInKeys}</span>
+          </DropdownMenuItem>
+        )}
 
         {hasClear && (
           <>
@@ -101,7 +120,7 @@ export function EnvVarActionsMenu({
               variant="destructive"
             >
               <Trash2 className="size-3.5" />
-              <span>Clear</span>
+              <span>{copy.clear}</span>
             </DropdownMenuItem>
           </>
         )}
@@ -115,16 +134,20 @@ interface EnvVarActionsTriggerProps extends Omit<React.ComponentProps<typeof But
 }
 
 export function EnvVarActionsTrigger({ className, label, ...props }: EnvVarActionsTriggerProps) {
+  const { t } = useI18n()
+  const copy = t.settings.envActions
+
   return (
-    <Button
-      aria-label={`Actions for ${label}`}
-      className={cn('text-muted-foreground hover:text-foreground', className)}
-      size="icon-sm"
-      title="Credential actions"
-      variant="ghost"
-      {...props}
-    >
-      <Codicon name="ellipsis" size="0.875rem" />
-    </Button>
+    <Tip label={copy.credentialActions}>
+      <Button
+        aria-label={copy.actionsFor(label)}
+        className={cn('text-muted-foreground hover:text-foreground', className)}
+        size="icon-sm"
+        variant="ghost"
+        {...props}
+      >
+        <Codicon name="ellipsis" size="0.875rem" />
+      </Button>
+    </Tip>
   )
 }
