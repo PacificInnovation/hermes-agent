@@ -103,7 +103,10 @@ def _prune_env_pool_entries(env_var: str) -> List[str]:
             else:
                 del pool[provider]
         if changed:
-            _save_auth_store(auth_store)
+            # Deliberate prune of a deleted env credential's pool entries — an
+            # intentional shrink that may empty the store, so it must opt past
+            # the empty-store wipe guard (Kiraku delta in auth._save_auth_store).
+            _save_auth_store(auth_store, allow_provider_shrink=True)
     return pruned
 
 

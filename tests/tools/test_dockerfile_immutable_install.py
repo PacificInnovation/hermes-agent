@@ -29,7 +29,11 @@ def test_dockerfile_keeps_mutable_state_under_opt_data() -> None:
 
     assert "ENV HERMES_HOME=/opt/data" in text
     assert "ENV HERMES_WRITE_SAFE_ROOT=/opt/data" in text
-    assert 'VOLUME [ "/opt/data" ]' in text
+    # Kiraku/Railway divergence: the `VOLUME [ "/opt/data" ]` directive is
+    # intentionally omitted from this fork's Dockerfile — Railway manages the
+    # /opt/data mount via Railway Volumes and rejects an in-Dockerfile VOLUME.
+    # Mutable state still lives under /opt/data (asserted above). See
+    # docs/UPSTREAM-SYNC.md and the "Remove Docker VOLUME directive" commit.
 
 
 def test_dockerfile_disables_runtime_install_mutations() -> None:
