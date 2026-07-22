@@ -95,6 +95,17 @@ git log --oneline --no-merges upstream/main..origin/railway-deploy
      This is the *only* shared-file touch, deliberately one line each so a
      re-baseline has almost nothing to reconcile here. All logic lives in the new
      `kai_ingest.py`.
+3. **Dashboard trusted-hosts** (`HERMES_DASHBOARD_TRUSTED_HOSTS`, added at the
+   v0.19.0 sync): `hermes_cli/web_server.py` gains `_extra_trusted_hosts()` + one
+   line in `_is_accepted_host` so a **loopback-bound** dashboard fronted by
+   cloudflared accepts the tunnel's public host (`Host`/`Origin`) without a public
+   bind or a login. Load-bearing because 0.19.0 removed the `--insecure` bypass
+   the old cloudflared-loopback trick relied on. `tests/hermes_cli/test_web_server_host_header.py`
+   covers it. **Deploy requires two Railway vars:**
+   `HERMES_DASHBOARD_HOST=127.0.0.1` and `HERMES_DASHBOARD_TRUSTED_HOSTS=hermes.kiraku.io`
+   (without them the dashboard either refuses to bind `0.0.0.0` without auth, or
+   400s the tunnel's Host header). One shared-file touch; re-verify it survives if
+   upstream refactors the Host guard.
 
 **Keep it this way.** When adding Kiraku features, prefer **new files** + minimal
 one-line hooks into upstream files. Smaller, more isolated delta = cheaper sync.
