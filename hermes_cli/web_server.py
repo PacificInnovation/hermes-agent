@@ -397,6 +397,26 @@ _LOOPBACK_HOST_VALUES: frozenset = frozenset({
 })
 
 
+def _extra_trusted_hosts() -> frozenset:
+    """Exact Host/Origin hostnames accepted in ADDITION to the bound interface,
+    from ``HERMES_DASHBOARD_TRUSTED_HOSTS`` (comma-separated, case-insensitive).
+
+    Opt-in escape hatch for the reverse-proxy / tunnel topology (Kiraku delta):
+    a loopback-bound dashboard fronted by cloudflared (or nginx/Caddy) receives
+    the PUBLIC hostname in Host/Origin, not a loopback name, so the DNS-rebinding
+    guard would otherwise 400 (HTTP) / 4403 (WS) those requests. Listing the
+    exact public host(s) re-accepts them WITHOUT reopening a public bind — the
+    dashboard stays loopback-bound (no app-layer auth needed) and the fronting
+    proxy (e.g. Cloudflare Access) remains the real access boundary.
+
+    Empty by default → guard unchanged (full DNS-rebinding protection). Only
+    EXACT hosts match — no wildcards, no subdomain expansion — so an attacker's
+    rebinding hostname is never accepted unless an operator literally lists it.
+    """
+    raw = os.getenv("HERMES_DASHBOARD_TRUSTED_HOSTS", "")
+    return frozenset(h.strip().lower() for h in raw.split(",") if h.strip())
+
+
 def should_require_auth(host: str, allow_public: bool = False) -> bool:
     """Return True iff the dashboard auth gate must be active.
 
@@ -447,6 +467,12 @@ def _is_accepted_host(host_header: str, bound_host: str) -> bool:
     else:
         host_only = h.rsplit(":", 1)[0] if ":" in h else h
     host_only = host_only.lower()
+
+    # Operator-configured trusted hosts (HERMES_DASHBOARD_TRUSTED_HOSTS) are
+    # accepted regardless of bind — the reverse-proxy / tunnel escape hatch.
+    # Empty set by default, so this is a no-op unless explicitly configured.
+    if host_only in _extra_trusted_hosts():
+        return True
 
     # 0.0.0.0 bind means operator explicitly opted into all-interfaces
     # (requires --insecure per web_server.start_server). No Host-layer

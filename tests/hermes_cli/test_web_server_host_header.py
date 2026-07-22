@@ -83,6 +83,33 @@ class TestHostHeaderValidator:
         assert _is_accepted_host("LOCALHOST", "127.0.0.1")
         assert _is_accepted_host("LocalHost:9119", "127.0.0.1")
 
+    def test_trusted_hosts_env_accepted_on_loopback_bind(self, monkeypatch):
+        """Kiraku delta: HERMES_DASHBOARD_TRUSTED_HOSTS lets a loopback-bound
+        dashboard behind a tunnel accept its configured public host — the
+        cloudflared reverse-proxy topology (no public bind, no login)."""
+        from hermes_cli.web_server import _is_accepted_host
+
+        monkeypatch.setenv(
+            "HERMES_DASHBOARD_TRUSTED_HOSTS", "hermes.kiraku.io, other.example"
+        )
+        # Both configured hosts accepted, port and case variations too.
+        assert _is_accepted_host("hermes.kiraku.io", "127.0.0.1")
+        assert _is_accepted_host("hermes.kiraku.io:443", "127.0.0.1")
+        assert _is_accepted_host("HERMES.KIRAKU.IO", "127.0.0.1")
+        assert _is_accepted_host("other.example", "127.0.0.1")
+        # A host NOT in the list is still rejected on a loopback bind.
+        assert not _is_accepted_host("evil.example", "127.0.0.1")
+
+    def test_trusted_hosts_unset_keeps_rebinding_protection(self, monkeypatch):
+        """Default (env unset/empty) → no trusted hosts → the guard is
+        unchanged and still rejects non-loopback hosts on a loopback bind."""
+        from hermes_cli.web_server import _is_accepted_host
+
+        monkeypatch.delenv("HERMES_DASHBOARD_TRUSTED_HOSTS", raising=False)
+        assert not _is_accepted_host("hermes.kiraku.io", "127.0.0.1")
+        monkeypatch.setenv("HERMES_DASHBOARD_TRUSTED_HOSTS", "   ")  # whitespace only
+        assert not _is_accepted_host("hermes.kiraku.io", "127.0.0.1")
+
 
 class TestHostHeaderMiddleware:
     """End-to-end test via the FastAPI app — verify the middleware
@@ -215,3 +242,28 @@ class TestWebSocketHostOriginGuard:
             },
         ):
             pass
+
+    def test_ws_host_origin_guard_honors_trusted_hosts(self, monkeypatch):
+        """Kiraku delta: the WS Host/Origin guard funnels through
+        _is_accepted_host, so a configured trusted host (the tunnel's public
+        hostname) is accepted for the chat WebSocket — not just HTTP."""
+        import types
+
+        import hermes_cli.web_server as ws
+
+        monkeypatch.setattr(ws.app.state, "bound_host", "127.0.0.1", raising=False)
+        monkeypatch.setenv("HERMES_DASHBOARD_TRUSTED_HOSTS", "hermes.kiraku.io")
+
+        allowed = types.SimpleNamespace(headers={
+            "host": "hermes.kiraku.io",
+            "origin": "https://hermes.kiraku.io",
+        })
+        assert ws._ws_host_origin_reason(allowed) is None
+        assert ws._ws_host_origin_is_allowed(allowed) is True
+
+        # A host not on the list is still rejected on the WS path.
+        blocked = types.SimpleNamespace(headers={
+            "host": "evil.example",
+            "origin": "https://evil.example",
+        })
+        assert ws._ws_host_origin_reason(blocked) is not None
